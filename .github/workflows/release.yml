@@ -305,26 +305,21 @@ jobs:
   # 保持完全体一致（config 模板 + permission_rules + maths-toolkit +
   # platform 标记），防止 Windows 包缺失组件（问题：打包漂移）。
   build-windows-x86-64:
-    # 0.1.12 P27 决策（2026-09-06，rc5 实证后回退）：MSVC **基础库层**
-    #（atoms/commons/cupolas/heapstore/protocols/gateway）编译+链接已全绿
-    #（#122→#133 守卫链，P25），本腿可产 zip；但 **daemons 15 服务与
-    # airy_cli 产品二进制尚未移植 Windows**——zip 缺 REQUIRED_BIN 关键组件，
-    # publish-release.sh 预检 fail-closed 实证（rc5 publish 中止）：
-    # "包内缺少关键组件: windows-x86-64.zip: airy_cli gateway_d llm_d think_d
-    # sched_d tool_d mem_d agent_d …"。故 Windows 不作为 v0.1.12 交付物；
-    # 本腿降级为 **dispatch-only 编译 canary**（跟踪编译/链接回归），产品
-    # 完整性（daemons/CLI/运行测试）列入 0.1.13 移植里程碑（G1/G2）。
+    # G1 升 gate（2026-09-07，0.1.13 清零）：daemons 15 + airy_cli + TUI +
+    # python 运行时已随各 wave 移植且编译全绿（wave-11b 起连续多轮全绿；
+    # MSVC ctest 自 35 项 SegFault 收敛至全绿 = G2，build-test windows-build
+    # 已恢复 required 门禁，6fdf90da4）；本腿脱离 P27 canary——tag/dispatch
+    # 均入发布矩阵，zip 经 release 聚合进入 publish REQUIRED_BIN/SUBTREE
+    # 预检（即 G1 出口实证：任一 daemon/CLI/TUI/python 缺失即中止发布）。
+    # 用户裁决：0.1.13 Windows 必须完整。
     # E3：与 build-test windows-build 共享 ci-windows-runner-bus，防 MSVC 腿
     # 双 workflow 并跑占满 windows hosted 配额。
-    if: github.event_name == 'workflow_dispatch'
     concurrency:
       group: ci-windows-runner-bus
       cancel-in-progress: false
     runs-on: windows-latest
-    # canary 语义：失败/产物不完整均不阻断发布；zip 供移植进度审计。
-    #（release job 已显式剔除 windows 制品，见 "Drop experimental..." 步骤，
-    #   防 dispatch 下 zip 早于 release 完成而被并入发布 dist。）
-    continue-on-error: true
+    # gate 语义：构建失败/zip 不完整即本腿失败（B1 同口径，不再静默缺件）。
+    continue-on-error: false
     env:
       # BAN-33：构建目录位于源码树外（工作区上级目录）
       BUILD_DIR: ../build
@@ -420,13 +415,15 @@ jobs:
           $env:CARGO_TARGET_DIR = "$env:RUNNER_TEMP\tui-target"
           Push-Location "agent-workload/sdk/tui"
           & cargo build --release
+          if ($LASTEXITCODE -ne 0) { throw "[windows] TUI 构建失败（exit $LASTEXITCODE，bin/agentrt-tui.exe 发布完整性必需）" }
           Pop-Location
           if (Test-Path "$env:CARGO_TARGET_DIR\release\agentrt-tui.exe") {
             Copy-Item "$env:CARGO_TARGET_DIR\release\agentrt-tui.exe" "${{ env.STAGE_DIR }}\bin\" -Force
-          } else { Write-Host "warn: TUI 构建产物缺失（降级）" }
+          } else { throw "[windows] TUI 产物缺失: $env:CARGO_TARGET_DIR\release\agentrt-tui.exe" }
           New-Item -ItemType Directory -Path "${{ env.STAGE_DIR }}\lib" -Force | Out-Null
           foreach ($p in @("agent-workload/ecosystem/agents/airymax_agents","agent-workload/ecosystem/agents/airymax_agents_rs","agent-workload/ecosystem/agents/orchestration","agent-workload/sdk/sdk-python/agentrt")) {
-            if (Test-Path $p) { Copy-Item -Path $p -Destination "${{ env.STAGE_DIR }}\lib\" -Recurse -Force }
+            if (-not (Test-Path $p)) { throw "[windows] python 运行时子树缺失: $p" }
+            Copy-Item -Path $p -Destination "${{ env.STAGE_DIR }}\lib\" -Recurse -Force
           }
 
       # zip 包与 tar.gz 完全体一致（install.ps1 二进制模式依赖 config 模板）。
@@ -893,14 +890,12 @@ jobs:
   # 实证：runner 美东→atomgit/OBS 上传 ~20MB 需 ~15min 撞 900s 超时被掐断）
   # 已由脚本 --max-time 3600 + 3 并发 + 上传完整性校验根治。
   release:
-    # build-windows-x86-64 / build-linux-riscv-64 为 dispatch-only 门控（P27：
-    # windows 产品未完整，zip 缺 daemons/CLI，见该 job 头注；riscv 为 QEMU
-    # 6h 上限预留 0.3.x），不在 needs。门禁 = 已实证全绿的 Linux x86-64 /
-    # x86-32 / arm-64 / arm-32 + macOS arm-64 / x86-64 六平台（arm-32 于
-    # G3 收口 2026-09-06 从 experimental 移入 needs，连续绿证据见
-    # build-linux-arm-32 头注）。arm-32 在 needs 中 → release 聚合必含其
-    # 制品，无"随后补发"缺口。
-    needs: [build-linux-x86-64, build-macos-arm-64, build-macos-x86-64, build-linux-arm-64, build-linux-32, build-linux-arm-32]
+    # 门禁（0.1.13 清零）：Linux x86-64 / x86-32 / arm-64 / arm-32 + macOS
+    # arm-64 / x86-64 + **Windows x86-64** 七平台（G1 升 gate 2026-09-07：
+    # windows 产品完整 + MSVC ctest 全绿，见 build-windows-x86-64 头注；
+    # arm-32 于 G3 收口 2026-09-06 移入 needs）。riscv 为 dispatch-only
+    # canary（B10：0.1.13 不发 RISC-V 制品，QEMU 6h 上限预留 0.3.x）。
+    needs: [build-linux-x86-64, build-macos-arm-64, build-macos-x86-64, build-linux-arm-64, build-linux-32, build-linux-arm-32, build-windows-x86-64]
     runs-on: ubuntu-latest
     # tag 推送或手动 dispatch（手动时版本来自 inputs.version）皆可触发
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
@@ -928,13 +923,15 @@ jobs:
           path: dist
           merge-multiple: true
 
-      # P27（2026-09-06，rc5 实证）：windows canary 的 zip 若早于本 job 完成会
-      # 被并入 dist；其缺 daemons/CLI（产品未完整），publish 预检 fail-closed
-      # 会中止整链。显式剔除 windows 制品（auditable），正式发布不含 windows。
-      - name: Drop experimental windows artifact from release dist
+      # G1（2026-09-07）：windows zip 随 release 聚合入 dist，publish
+      # REQUIRED_BIN/SUBTREE 预检为 G1 出口实证（zip 任一 daemon/CLI/TUI/
+      # python 缺失即中止发布）。zip 不参与下方 gen1~gen3 标记补全
+      #（tar.gz 专用；windows 首版 0.1.13 发布，无旧安装器兼容面）。
+      - name: Assert windows zip present in release dist
         run: |
-          rm -f dist/agentrt-*-windows-x86-64.zip dist/agentrt-*-windows-x86-64.zip.sha256
-          echo "release dist 最终制品: $(ls dist/agentrt-*.tar.gz 2>/dev/null | wc -l) 个 tar.gz"
+          ls -la dist/agentrt-*-windows-x86-64.zip* 2>/dev/null \
+            || { echo "::error::windows zip 未聚合入 dist（G1 出口缺失）"; exit 1; }
+          echo "release dist 最终制品: $(ls dist/agentrt-*.tar.gz 2>/dev/null | wc -l) 个 tar.gz + $(ls dist/*.zip 2>/dev/null | wc -l) 个 zip"
 
       # 0.1.10a 修复（生产实证，2026-09-05）：包内只含 gen3 标记（如
       # platform-x86-64）导致 ≤v0.1.9 更新器拒绝升级——旧更新器以精确文件名
