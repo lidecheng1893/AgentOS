@@ -1,0 +1,96 @@
+name: G4b macOS Clean-Host
+
+# 0.1.13 G4b 真机核验载体：在 GitHub 托管 macOS runner（一次性干净 VM）上
+# 复刻 e2e-clean-room 语义——install.sh --from-file 离线安装发布制品 →
+# 完整启动器拉起 daemon 群 → gateway TCP 探测 → airy_cli /daemons 冒烟
+# （online N==M 断言）。这是"macOS 干净真机 daemon 群可启"（G4 出口末项）
+# 在流水线内可到达的最强载体；正式 tag v0.1.13 发布前以此出证。
+#
+# 制品口径：安装器与完整启动器取本 workflow 所在提交树（agentrt main 的
+# scripts/install.sh + latest/airymaxrt——含 G4b 修正的 macOS-clean 实现，
+# 即正式 v0.1.13 将随包发布的同一对象）；daemon/TUI/CLI 产品二进制取
+# 指定版本 release 的 macos 平台 tar.gz（product 内容与正式发布一致）。
+#
+# 触发：
+#   - workflow_dispatch（版本由输入指定，默认验证 v0.1.13-rc4 制品）；
+#   - push 到 g4b-* tag（tag 指向含本 workflow 的提交即可，无需 PAT）。
+# 两条腿：arm-64（macos-latest）与 x86-64（macos-15-intel），各自验证
+# 对应架构发布包。判定全在脚本内 fail-closed：job 结论 success 即出证。
+#
+# 注意（镜像拓扑）：产品 tar.gz 从 atomgit(SSoT) release 拉取；
+# GitHub-hosted runner 可达 atomgit（rc e2e U9 阶段同源实证）。断言输出
+# 打在步骤日志；job/step 结论经匿名 jobs API 可读，即台账证据。
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '待核验产品版本（如 v0.1.13-rc4）'
+        required: true
+        default: 'v0.1.13-rc4'
+  push:
+    tags:
+      - 'g4b-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: g4b-macos-clean-host
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ github.event.inputs.version || 'v0.1.13-rc4' }}
+
+jobs:
+  clean-host-arm64:
+    name: G4b macOS arm-64 clean-host
+    runs-on: macos-latest
+    env:
+      SUFFIX: macos-arm-64
+    steps:
+      - name: Checkout (workflow + verify script)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Download product tarball (atomgit release)
+        run: |
+          set -euo pipefail
+          BASE="https://atomgit.com/openairymax/agentrt/releases/download/${VERSION}"
+          curl -fsSL -o "agentrt-${VERSION}-${SUFFIX}.tar.gz" "$BASE/agentrt-${VERSION}-${SUFFIX}.tar.gz"
+          curl -fsSL -o "agentrt-${VERSION}-${SUFFIX}.tar.gz.sha256" "$BASE/agentrt-${VERSION}-${SUFFIX}.tar.gz.sha256"
+          ls -la agentrt-*
+
+      - name: Run G4b clean-host verify
+        run: bash .github/scripts/verify-macos-clean-host.sh \
+            "$PWD/scripts/install.sh" \
+            "$PWD/agentrt-${VERSION}-${SUFFIX}.tar.gz" \
+            "$PWD/latest/airymaxrt"
+
+  clean-host-x86_64:
+    name: G4b macOS x86-64 clean-host
+    runs-on: macos-15-intel
+    env:
+      SUFFIX: macos-x86-64
+    steps:
+      - name: Checkout (workflow + verify script)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Download product tarball (atomgit release)
+        run: |
+          set -euo pipefail
+          BASE="https://atomgit.com/openairymax/agentrt/releases/download/${VERSION}"
+          curl -fsSL -o "agentrt-${VERSION}-${SUFFIX}.tar.gz" "$BASE/agentrt-${VERSION}-${SUFFIX}.tar.gz"
+          curl -fsSL -o "agentrt-${VERSION}-${SUFFIX}.tar.gz.sha256" "$BASE/agentrt-${VERSION}-${SUFFIX}.tar.gz.sha256"
+          ls -la agentrt-*
+
+      - name: Run G4b clean-host verify
+        run: bash .github/scripts/verify-macos-clean-host.sh \
+            "$PWD/scripts/install.sh" \
+            "$PWD/agentrt-${VERSION}-${SUFFIX}.tar.gz" \
+            "$PWD/latest/airymaxrt"
