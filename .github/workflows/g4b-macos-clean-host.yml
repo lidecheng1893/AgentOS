@@ -65,10 +65,9 @@ jobs:
 
       - name: Run G4b clean-host verify
         run: |
-          echo "PWD=$PWD"; ls -la | head -20
-          echo "--- scripts/ ---"; ls -la scripts 2>&1 | head -20
-          echo "--- latest/ ---"; ls -la latest 2>&1 | head
-          test -f scripts/install.sh && echo "install.sh present"
+          echo "::error::G4BDBG PWD=$PWD"
+          echo "::error::G4BDBG top-level: $(ls -1 | tr '\n' ' ')"
+          echo "::error::G4BDBG scripts-dir: $(ls -1 scripts 2>&1 | tr '\n' ' ')"
           bash .github/scripts/verify-macos-clean-host.sh \
             "$PWD/scripts/install.sh" \
             "$PWD/agentrt-${VERSION}-${SUFFIX}.tar.gz" \
