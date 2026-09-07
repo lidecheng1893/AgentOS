@@ -1098,12 +1098,24 @@ jobs:
         run: |
           docker pull ubuntu:20.04
           PREV_ARG=""
-          if [ -n "${PREV_TARBALL:-}" ]; then PREV_ARG="/w/$PREV_TARBALL"; fi
+          FULL_ARG=""
+          if [ -n "${PREV_TARBALL:-}" ]; then
+            # U9 需要 airymaxrt-full：二进制安装的 bin/airymaxrt 为 thin 包装，
+            # 管理命令经 full 委托（联网时从 agentrt 仓 main latest/airymaxrt
+            # 拉取）。clean 容器无 curl/python 不可联网——job 侧（有网）预取
+            # 同一对象，contents API base64 解码（~100KB < 1MB 阈值），经
+            # /w 只读挂载传入 e2e 第四参，由 e2e 在 U9b 自举 seed。
+            curl -fsSL "https://api.atomgit.com/api/v5/repos/openairymax/agentrt/contents/latest/airymaxrt?ref=main" \
+              | python3 -c 'import json,sys,base64;sys.stdout.buffer.write(base64.b64decode(json.load(sys.stdin)["content"]))' > dist/airymaxrt-full
+            chmod +x dist/airymaxrt-full
+            FULL_ARG="/w/dist/airymaxrt-full"
+            PREV_ARG="/w/$PREV_TARBALL"
+          fi
           docker run --rm -v "$PWD:/w:ro" ubuntu:20.04 \
             bash /w/_tools/scripts/ci/release/e2e-clean-room.sh \
               /w/dist/install.sh \
               "/w/dist/agentrt-${{ env.VERSION }}-linux-x86-64.tar.gz" \
-              $PREV_ARG
+              $PREV_ARG $FULL_ARG
 
   # 发布全链（0.1.11 D0/D1/D2）：cosign 签名制品 + GPG 签名 manifest +
   # manifest 生成（含 gen1~gen3 平台别名）+ 上传 atomgit release +
