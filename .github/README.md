@@ -83,13 +83,17 @@ windows job）+ 一套复用件（lf-* / 镜像 / 脚本）**，即"逻辑上三
 
 ## 工作流
 
-| workflow | 触发 | 说明 |
+GitHub Actions 侧栏按 workflow 的 `name:` 显示（0.1.13 命名统一：display name = 文件名的
+人类可读版，Title Case，≤3 词；`release.yml` 另设 `run-name` 使 run 列表直接显示版本而非
+commit subject）。文件名为唯一 SSoT 标识（branch protection / dispatch 引用文件名）。
+
+| workflow（显示名） | 触发 | 说明 |
 |----------|------|------|
-| `build-test.yml` | `push main` / `pull_request` / `workflow_dispatch` | 三平台高频门禁：Linux（Debug + ctest + gcovr 覆盖率阈值）/ macOS（Homebrew）/ Windows（vcpkg + MSVC）。G2 达成（0.1.13）：windows ctest 35→全绿，`windows-build` 为 required 硬门禁 |
-| `build-toolchain-images.yml` | `push main`（Dockerfile/相关变更）/ `workflow_dispatch` | 交叉工具链镜像（arm64/arm32/i386 容器腿）构建并推送 GHCR，digest 钉版供 release 腿引用 |
-| `codegen-check.yml` | `push main` / `pull_request` / `workflow_dispatch` | `syscall_gen.py --check` 校验 `syscall.xml` 与生成产物漂移 |
-| `release.yml` | `tag v*` 推送 / `workflow_dispatch`（输入 version） | 发布链（G1 起 windows 为 required gate）：linux-x86-64 / linux-arm-64 / linux-arm-32 / linux-x86-32 / linux-riscv-64（canary）/ macos-arm-64 / macos-x86-64 / windows-x86-64 → 聚合 `release` → **`e2e-clean-room`**（H2 洁净容器：安装 → daemon 群 → CLI 冒烟 + **U9 旧版升级路径**，publish 前置门禁）→ `publish`（Environment 审批：REQUIRED_BIN/SUBTREE 预检 + cosign/GPG 签名 + 26 资产一次落库 + manifest.latest）。publish 通过后拉取 stable manifest 的 prev 制品在下一 rc/发布自动回归 U9 |
-| `sync-mirror.yml` | `push main` / `workflow_dispatch` | `sync-mirror.sh`：agentrt + 7 叶子从 atomgit(SSoT) 同步至 GitHub / Gitee（缺仓自动创建，atoms 私有，错误隔离汇总） |
+| `build-test.yml`（Build & Test） | `push main` / `pull_request` / `workflow_dispatch` | 三平台高频门禁：Linux（Debug + ctest + gcovr 覆盖率阈值）/ macOS（Homebrew）/ Windows（vcpkg + MSVC）。G2 达成（0.1.13）：windows ctest 35→全绿，`windows-build` 为 required 硬门禁 |
+| `build-toolchain-images.yml`（Toolchain Images） | `push main`（Dockerfile/相关变更）/ `workflow_dispatch` | 交叉工具链镜像（arm64/arm32/i386 容器腿）构建并推送 GHCR，digest 钉版供 release 腿引用 |
+| `codegen-check.yml`（Codegen Checks） | `push main` / `pull_request` / `workflow_dispatch` | `syscall_gen.py --check` 校验 `syscall.xml` 与生成产物漂移 + SSoT registry 校验 |
+| `release.yml`（Release，`run-name: Release <版本>`） | `tag v*` 推送 / `workflow_dispatch`（输入 version） | 发布链（G1 起 windows 为 required gate）：linux-x86-64 / linux-arm-64 / linux-arm-32 / linux-x86-32 / linux-riscv-64（canary）/ macos-arm-64 / macos-x86-64 / windows-x86-64 → 聚合 `release` → **`e2e-clean-room`**（H2 洁净容器：安装 → daemon 群 → CLI 冒烟 + **U9 旧版升级路径**，publish 前置门禁）→ `publish`（Environment 审批：REQUIRED_BIN/SUBTREE 预检 + cosign/GPG 签名 + 26 资产一次落库 + manifest.latest）。publish 通过后拉取 stable manifest 的 prev 制品在下一 rc/发布自动回归 U9 |
+| `sync-mirror.yml`（Mirror Sync） | `push main` / `tag v*` / `repository_dispatch` / `workflow_dispatch` | `sync-mirror.sh`：agentrt + 7 叶子从 atomgit(SSoT) 同步至 GitHub / Gitee（缺仓自动创建，atoms 私有，错误隔离汇总） |
 
 ## 布局与子模块
 

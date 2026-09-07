@@ -1,4 +1,4 @@
-name: Sync to GitHub & Gitee
+name: Mirror Sync
 on:
   push:
     branches: [main]

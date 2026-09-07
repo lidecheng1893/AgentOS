@@ -1,4 +1,4 @@
-name: Build QEMU Toolchain Images
+name: Toolchain Images
 
 # 0.1.11 E1：预构建 qemu 工具链镜像并推 GHCR，供 release.yml qemu 腿
 # docker run 复用（省每轮 lib-builddeps 源码重编，arm-64 88min→~20min）。

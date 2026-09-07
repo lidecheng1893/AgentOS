@@ -1,4 +1,4 @@
-name: SSoT & codegen drift checks
+name: Codegen Checks
 
 # 0.2.0 CI 收敛（2026-09-04）：原 codegen-check.yml + ssot-validate.yml 两条
 # "校验类"流水线合并为一条（agentrt workflow 数 5→4）。触发器语义保持：
