@@ -418,6 +418,19 @@ sed_inplace() { # <sed-expr> <file>
     fi
 }
 
+# 便携 sha256（G4b/macOS 干净机 2026-09-08）：核心工具链不含 GNU coreutils
+# （无 sha256sum），macOS 原生为 shasum -a 256。两分支输出格式均为
+# "<hex>  <path>"，awk 取首列即得 hex。供 apply_package/update 的校验门禁。
+sha256_file() { # <file> → hex；无可用实现输出空（校验会 fail-closed）
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" 2>/dev/null | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+    else
+        printf ''
+    fi
+}
+
 # ── 组件定位 ─────────────────────────────────────────────────────────────────
 # find_tool <env_name> <command_name> <候选路径...>
 #   优先显式环境变量，其次伞仓内构建产物，最后 PATH 中的命令。
@@ -589,11 +602,13 @@ upsert_profile_var() { # <KEY> <值>
 
 # ── 自更新器：airymaxrt update ──────────────────────────────────────────────
 # 协议（与 tools/scripts/ci/release/publish-release.sh 对称）：
-#   1. 读 install.env 当前版本/通道
+#   1. 读 install.env 当前版本/通道/制品 sha256
 #   2. 下载通道 manifest（latest/manifest.<channel>.json）→ GPG 验签
-#   3. 版本比较 → 下载当前平台 tarball → sha256 校验 → 架构自检
-#   4. 备份 bin/lib/include/share 到 .rollback/ → 热替换 → 更新 install.env
-#   5. 替换后自检；--rollback 手动恢复上次备份
+#   3. 版本比较；版本相同再比制品 sha256（同 tag 修复重发可检测）→ 下载
+#      当前平台 tarball → sha256 校验 → 架构自检
+#   4. 备份 bin/lib/include/share（含 install.env 快照）到 .rollback/
+#      → 镜像同步热替换 → 更新 install.env（版本号 + 制品 sha256）
+#   5. 替换后自检；--rollback 手动恢复上次备份（.rollback 最多保留上一版）
 # 官方制品仓库：atomgit.com/openairymax/agentrt（releases 附件 + latest/ 固定入口）
 # 通道：stable / beta（tag 含 -beta./-rc. 归 beta）。
 AIRY_GPG_PUBKEY='-----BEGIN PGP PUBLIC KEY BLOCK-----
@@ -620,7 +635,12 @@ field_cmp() {
     while [ -n "$y" ] && [[ "$y" == [a-zA-Z]* ]]; do y="${y#?}"; done
     xn="${x%%[a-zA-Z]*}"; xl="${x#$xn}"
     yn="${y%%[a-zA-Z]*}"; yl="${y#$yn}"
-    xn="${xn:-0}"; yn="${yn:-0}"
+    # D10（2026-09-07）：脏字段防护——剥字母前缀后数字段仍可能残留非
+    # 数字字符（如语义化 build 元数据 v0.1.13+build.5 截出 "13+"），
+    # 10# 算术抛错致函数空返回、ver_cmp 静默判等（升级漏判）。非
+    # [0-9] 字符一律剥除，清洗后为空按 0 处理（比较降级但不中断）。
+    xn="$(printf '%s' "$xn" | tr -cd '0-9')"; xn="${xn:-0}"
+    yn="$(printf '%s' "$yn" | tr -cd '0-9')"; yn="${yn:-0}"
     if (( 10#$xn > 10#$yn )); then echo 1; return; fi
     if (( 10#$xn < 10#$yn )); then echo -1; return; fi
     if [ -z "$xl" ] && [ -z "$yl" ]; then echo 0; return; fi
@@ -741,7 +761,9 @@ elif mode.startswith("artifact:"):
 PYEOF
         return 0
     fi
-    # 回退：仅顶层 latest / 单行 artifact 提取
+    # 回退：仅顶层 latest（单行键形安全）。artifact 嵌套字段无可靠解析、
+    # 恒空返回——远程更新路径由调用方按 D7 fail-closed 拒绝，离线路径
+    # （--file + --sha256）不依赖本函数。
     case "$mode" in
         latest) sed -n 's/.*"latest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -1 ;;
         artifact:*) : ;;
@@ -788,16 +810,51 @@ verify_gpg_sig() { # <file> <sig.asc>
     gpg --batch --no-tty --homedir "$GNUPG" --verify "$sig" "$f" >/dev/null 2>&1
 }
 
-# 替换包体：sha256 强制校验 → 备份 → 热替换 → 自检 → 失败自动回滚 →
-# 更新 install.env。期望校验值由调用方传入（manifest 或 --sha256/相邻 .sha256），
-# 缺期望值直接拒绝（问题 12：离线包/远程包统一防绕过验签口径）。
+# ── 回滚/清理辅助（2026-09-07 加固）─────────────────────────────────────
+# 镜像回拷：恢复备份 = 先 rm -rf 清空目标再整目录 cp -r（与 apply_package
+# 的镜像同步对称）。旧实现 cp -rf "$bkup/$d"/* "$AIRY_HOME/$d/" 为叠加式
+# 拷贝，恢复后仍残留更新版独有文件（目录/软链/daemon），半新半旧。
+restore_from_backup() { # <backup目录>；返回 0=全部目录恢复成功
+    local rb="$1" d ok=1
+    for d in bin lib include share; do
+        if [ -d "$rb/$d" ]; then
+            rm -rf "$AIRY_HOME/$d"
+            cp -r "$rb/$d" "$AIRY_HOME/$d" 2>/dev/null || ok=0
+        else
+            # 备份不含该目录（历史包无此顶层目录）→ 删除目标保持镜像对称
+            rm -rf "$AIRY_HOME/$d"
+        fi
+    done
+    [ "$ok" = "1" ]
+}
+
+# .rollback 保留策略（社区要求"最多保留上一版"）：备份目录按 mtime 排序
+# （ls -1dt，最新在前）仅保留 1 份，删除更早备份。旧实现按目录名 sort -r
+# （v<版本>-<时间戳>）跨版本号边界会留旧删新——如 v0.1.9-* 字典序大于
+# v0.1.10-*，最新备份反被误删、回滚只能回到更旧版本。
+prune_rollback() {
+    ls -1dt "$AIRY_HOME"/.rollback/*/ 2>/dev/null | tail -n +2 | while read -r old; do
+        rm -rf "$old"
+    done
+}
+
+# 替换包体：sha256 强制校验 → 备份 → 镜像同步热替换 → 自检 → 失败自动回滚 →
+# 更新 install.env（版本号 + 制品 sha256）。期望校验值由调用方传入（manifest
+# 或 --sha256/相邻 .sha256），缺期望值直接拒绝（问题 12：离线包/远程包统一
+# 防绕过验签口径）。
 apply_package() { # <tarball> [expect_sha]
     local tarball="$1" expect_sha="$2" arch="$(detect_arch)"
+    # D9（2026-09-07）：崩溃孤儿清理——kill/断电留下的 apply.*/update.*
+    # 残留（单个 tarball 数百 MB）会在 $AIRY_HOME/tmp 无限累积；仅清
+    # 1 天前的旧目录，避开并发活跃进程的临时区。完整目录级原子替换
+    # （staging+swap）改动面大，登记后置。
+    find "$AIRY_HOME/tmp" -maxdepth 1 \( -name 'apply.*' -o -name 'update.*' \) -mtime +0 -exec rm -rf {} + 2>/dev/null
     local TMPD="$AIRY_HOME/tmp/apply.$$"
     rm -rf "$TMPD"; mkdir -p "$TMPD"
-    # sha256 强制校验（fail-closed）
+    # sha256 强制校验（fail-closed）。G4b/macOS 干净机 2026-09-08：核心
+    # 工具链无 GNU sha256sum，走 shasum -a 256 回退（sha256_file，见上）。
     if [ -n "$expect_sha" ]; then
-        if ! echo "${expect_sha}  ${tarball}" | sha256sum -c - >/dev/null 2>&1; then
+        if [ "$(sha256_file "$tarball")" != "$expect_sha" ]; then
             log error "sha256 校验失败，拒绝安装"; rm -rf "$TMPD"; return 1
         fi
         log ok "sha256 校验通过"
@@ -824,64 +881,123 @@ apply_package() { # <tarball> [expect_sha]
     local extracted="$(find "$TMPD" -maxdepth 1 -type d -name 'agentrt-*' | head -1)"
     [ -n "$extracted" ] || { log error "包结构异常（缺 agentrt-* 顶层目录）"; rm -rf "$TMPD"; return 1; }
     local new_ver="$(basename "$extracted" | sed -e 's/^agentrt-//' -e 's/^v//')"
-    # 备份当前版本
+    # 备份当前版本（0.1.6h 起目录带时间戳，同版本重复更新不覆盖上次备份）
     local cur_ver="$(sed -n 's/^AIRY_VERSION=//p' "$AIRY_HOME/config/install.env" 2>/dev/null | head -1)"
-    # 0.1.6h 修复：备份目录带时间戳——同版本重复更新会覆盖上次备份，
-    # 回滚失去意义；保留最近 3 份（尾部清理逻辑已在）。
     local bkup="$AIRY_HOME/.rollback/${cur_ver:-pre-update}-$(date +%Y%m%d%H%M%S)"
     rm -rf "$bkup"; mkdir -p "$bkup"
+    # 2026-09-07：install.env 随备份快照——回滚时连同版本号/AIRY_ARTIFACT_SHA256
+    # 一并还原，避免回滚后 install.env 残留新版本 sha 造成"同版本修复"误判
+    [ -f "$AIRY_HOME/config/install.env" ] && \
+        cp -f "$AIRY_HOME/config/install.env" "$bkup/install.env" 2>/dev/null || true
     for d in bin lib include share; do
         [ -d "$AIRY_HOME/$d" ] && cp -r "$AIRY_HOME/$d" "$bkup/" 2>/dev/null || true
     done
     log info "已备份当前版本: .rollback/（${cur_ver:-pre-update}）"
-    # 热替换（保留 config 用户配置/data/run/logs）
-    [ -d "$extracted/bin" ]     && cp -f "$extracted"/bin/*     "$AIRY_HOME/bin/"    2>/dev/null || true
-    [ -d "$extracted/lib" ]     && cp -f "$extracted"/lib/*     "$AIRY_HOME/lib/"    2>/dev/null || true
-    [ -d "$extracted/include" ] && cp -rf "$extracted"/include/* "$AIRY_HOME/include/" 2>/dev/null || true
-    [ -d "$extracted/share" ]   && cp -rf "$extracted"/share/*   "$AIRY_HOME/share/"   2>/dev/null || true
+    # ── 镜像同步热替换（2026-09-07 加固，保留 config/data/run/logs）──────
+    # 旧覆盖式替换（cp -f 逐文件叠加 + 仅删"新包仍含顶层目录内"的普通文件）
+    # 清不干净：目录/软链/旧版独有 daemon 与 lib/ 下 python 运行时目录永不
+    # 删除；lib/ 的 cp -f 遇目录还会被吞（错误被 2>/dev/null 吞掉）→ 残留
+    # 旧 daemon 被启动器按 bin/*_d 自动拉起，形成半新半旧状态。改为对
+    # bin/lib/include/share 整目录先 rm -rf 再 cp -r 新包目录的镜像同步，
+    # 新包已不包含的顶层目录整个删除。
+    local KEEP="$TMPD/keep-bin"
+    mkdir -p "$KEEP"
+    # 入口/环境生成文件（安装器或本更新器生成、包内多不含）先暂存，删后拷回
+    for _ef in airymaxrt airymaxrt-full agentrt-env.sh; do
+        [ -f "$AIRY_HOME/bin/$_ef" ] && cp -f "$AIRY_HOME/bin/$_ef" "$KEEP/$_ef" 2>/dev/null || true
+    done
+    for d in bin lib include share; do
+        rm -rf "$AIRY_HOME/$d"
+        if [ -d "$extracted/$d" ]; then
+            if ! cp -r "$extracted/$d" "$AIRY_HOME/$d" 2>/dev/null; then
+                log error "镜像同步失败（${d}/ 拷贝出错），自动回滚…"
+                restore_from_backup "$bkup"
+                rm -rf "$TMPD"
+                return 1
+            fi
+        fi
+        # 新包已不含该顶层目录 → 保持整体删除（镜像对称）
+    done
+    # 入口/环境文件拷回：新包 bin/ 已自带（如 airymaxrt-full）则采用包内新版
+    for _ef in airymaxrt airymaxrt-full agentrt-env.sh; do
+        [ -f "$KEEP/$_ef" ] || continue
+        [ -e "$extracted/bin/$_ef" ] && continue
+        mkdir -p "$AIRY_HOME/bin"
+        if cp -f "$KEEP/$_ef" "$AIRY_HOME/bin/$_ef" 2>/dev/null; then
+            if [ "$_ef" = "agentrt-env.sh" ]; then
+                chmod 700 "$AIRY_HOME/bin/$_ef" 2>/dev/null || true
+            else
+                chmod 755 "$AIRY_HOME/bin/$_ef" 2>/dev/null || true
+            fi
+        fi
+    done
+    rm -rf "$KEEP"
+    # config：模板类文件白名单强制覆盖（2026-09-07）——旧逻辑"只缺则补"
+    # 让模板永不随更新演进（agentrt.yaml/model.yaml/permission_rules.yaml
+    # 等 SSoT 模板须随版本刷新）；secrets.env 等用户配置绝不覆盖，其余
+    # 新包文件缺则补（兼容新版本新增的非模板配置）。
     if [ -d "$extracted/config" ]; then
+        mkdir -p "$AIRY_HOME/config"
         for f in "$extracted"/config/*; do
             [ -f "$f" ] || continue
             b="$(basename "$f")"
             case "$b" in
                 secrets.env) continue ;;   # 用户敏感配置绝不覆盖
+                agentrt.yaml|model.yaml|permission_rules.yaml)
+                    cp -f "$f" "$AIRY_HOME/config/$b" 2>/dev/null || true
+                    log info "config 模板已随更新刷新: $b" ;;
                 *) [ -f "$AIRY_HOME/config/$b" ] || cp -f "$f" "$AIRY_HOME/config/" 2>/dev/null || true ;;
             esac
         done
     fi
+    # ACL 权威路径联动：permission_rules.yaml 为 daemon 启动读取的 SSoT 模板
+    #（install.sh init_secrets 每次安装均强制覆盖到 config/cupolas/），更新
+    # 后顶层模板已刷新，这里同步权威副本，避免工具 ACL 不随更新。
+    # 残余项：install.sh 内的 init_secrets/install_maths_toolkit 等函数无法
+    # 跨脚本调用——maths-toolkit 模块文件与其运行时后端刷新留待 reinstall
+    # 时由安装器完成（本更新器仅覆盖其随包分发的 config 模板）。
+    if [ -f "$AIRY_HOME/config/permission_rules.yaml" ]; then
+        mkdir -p "$AIRY_HOME/config/cupolas"
+        cp -f "$AIRY_HOME/config/permission_rules.yaml" "$AIRY_HOME/config/cupolas/permission_rules.yaml" 2>/dev/null || true
+        chmod 600 "$AIRY_HOME/config/cupolas/permission_rules.yaml" 2>/dev/null || true
+    fi
     # 同步签名公钥（新包自带时）
     [ -f "$extracted/keys/agentrt.asc" ] && cp -f "$extracted/keys/agentrt.asc" "$AIRY_HOME/keys/" 2>/dev/null || true
-    # 0.1.6h 修复：清理旧版本独有文件（"更新没覆盖旧制品"根因）。
-    # 热替换只 cp -f 覆盖同名文件，旧版本独有 bin/*_d 等全部残留，
-    # 启动器按 bin/*_d 自动推导会把残留旧 daemon 一并拉起。
-    # 0.1.6h 补充修复：入口/环境生成文件（由安装器/更新器生成、包内
-    # 不含）必须排除清理——否则更新后 bin/airymaxrt 与 agentrt-env.sh
-    # 被误删，airymaxrt 命令直接失效（软链悬空），daemon 传递依赖
-    # 也无法解析。
-    for d in bin lib include share; do
-        [ -d "$AIRY_HOME/$d" ] && [ -d "$extracted/$d" ] || continue
-        for f in "$AIRY_HOME/$d"/*; do
-            [ -f "$f" ] || continue
-            case "$(basename "$f")" in
-                airymaxrt|airymaxrt-full|agentrt-env.sh) continue ;;
-            esac
-            [ -e "$extracted/$d/$(basename "$f")" ] || rm -f "$f"
-        done
-    done
-    # 自检：关键二进制存在（防止不完整包静默替换导致 daemon 群起不来）
+    # 自检：关键二进制存在（防止不完整包静默替换导致 daemon 群起不来）。
+    # 失败即镜像回拷（restore_from_backup 先清目标再回拷，非叠加式）
     if [ ! -x "$AIRY_HOME/bin/airy_cli" ] || [ ! -x "$AIRY_HOME/bin/agentrt-bootstrap.sh" ]; then
-        log error "热替换自检失败（bin/ 关键组件缺失），自动回滚…"
-        for d in bin lib include share; do
-            [ -d "$bkup/$d" ] && cp -rf "$bkup/$d"/* "$AIRY_HOME/$d/" 2>/dev/null || true
-        done
+        log error "镜像同步自检失败（bin/ 关键组件缺失），自动回滚…"
+        restore_from_backup "$bkup" || log error "回滚恢复不完整，请执行 reinstall 修复"
         rm -rf "$TMPD"
         return 1
     fi
-    # 固化新版本到 install.env（sed_inplace 跨平台：macOS BSD sed 直接
-    # 覆盖会失败，导致 AIRY_VERSION 键重复/不更新）
+    # lib/ python 运行时四子树自检（对齐 publish-release.sh REQUIRED_SUBTREE）：
+    # 本缺陷实录——install.sh/updater 的 lib/ 拷贝曾为非递归 cp，airymax_agents
+    # 等 python 运行时目录被静默漏拷（v0.1.11/0.1.12 安装树缺件、agent 无法
+    # 启动）。镜像同步后仍缺件即包体不完整或拷贝残缺，fail-closed 回滚拒绝。
+    for _py in airymax_agents airymax_agents_rs orchestration agentrt; do
+        if [ ! -d "$AIRY_HOME/lib/$_py" ]; then
+            log error "镜像同步自检失败（lib/${_py} python 运行时缺失），自动回滚…"
+            restore_from_backup "$bkup" || log error "回滚恢复不完整，请执行 reinstall 修复"
+            rm -rf "$TMPD"
+            return 1
+        fi
+    done
+    # 固化新版本与制品 sha 到 install.env（sed_inplace 跨平台：macOS BSD
+    # sed 直接覆盖会失败，导致键重复/不更新；键缺失时追加。AIRY_ARTIFACT_
+    # SHA256 为同 tag 修复重发检测依据，期望值已强校验=制品实际 sha）
     if [ -f "$AIRY_HOME/config/install.env" ]; then
-        sed_inplace "s|^AIRY_VERSION=.*|AIRY_VERSION=v${new_ver}|" "$AIRY_HOME/config/install.env" || \
+        if grep -q '^AIRY_VERSION=' "$AIRY_HOME/config/install.env" 2>/dev/null; then
+            sed_inplace "s|^AIRY_VERSION=.*|AIRY_VERSION=v${new_ver}|" "$AIRY_HOME/config/install.env"
+        else
             printf 'AIRY_VERSION=v%s\n' "$new_ver" >> "$AIRY_HOME/config/install.env"
+        fi
+        if grep -q '^AIRY_ARTIFACT_SHA256=' "$AIRY_HOME/config/install.env" 2>/dev/null; then
+            sed_inplace "s|^AIRY_ARTIFACT_SHA256=.*|AIRY_ARTIFACT_SHA256=${expect_sha}|" "$AIRY_HOME/config/install.env"
+        else
+            printf 'AIRY_ARTIFACT_SHA256=%s\n' "$expect_sha" >> "$AIRY_HOME/config/install.env"
+        fi
+        chmod 600 "$AIRY_HOME/config/install.env" 2>/dev/null || true
     fi
     rm -rf "$TMPD"
     # 0.1.6c 系统性修复：热替换后自愈 agentrt-env.sh。老用户（0.1.5a 及
@@ -897,14 +1013,21 @@ apply_package() { # <tarball> [expect_sha]
         chmod 700 "$AIRY_HOME/bin/agentrt-env.sh" 2>/dev/null || true
         log info "agentrt-env.sh 已补写 LD_LIBRARY_PATH 注入（0.1.6c 自愈）"
     fi
-    # 0.1.6a 修复：更新后重生成入口启动器。apply_package 仅热替换 bin/，
-    # 而轻量启动器（$AIRY_HOME/bin/airymaxrt）模板内嵌于 install.sh，
-    # 不会被更新刷新——旧轻量启动器无参数直通前端、daemon 群未拉起
-    # （社区"online 0/17"）。以完整启动器自身覆盖入口：其默认流程先确保
-    # 守护进程群就绪再进前端（与 start/无参数语义一致），且离线可用、
-    # 不依赖网络。远程通道与本地离线包（--file）两条更新路径均经此。
+    # 0.1.6a 修复：更新后重生成入口启动器。轻量启动器
+    #（$AIRY_HOME/bin/airymaxrt）模板内嵌于 install.sh、包内不含（镜像同步
+    # 已按 KEEP 暂存拷回旧版），不会被更新刷新——旧轻量启动器无参数直通
+    # 前端、daemon 群未拉起（社区"online 0/17"）。以完整启动器自身覆盖入口：
+    # 其默认流程先确保守护进程群就绪再进前端（与 start/无参数语义一致），
+    # 且离线可用、不依赖网络。远程通道与本地离线包（--file）两条更新路径
+    # 均经此。
     local _entry="$AIRY_HOME/bin/airymaxrt"
-    if [ -s "$_SOURCE" ] && [ "$_SOURCE" != "$(readlink -f "$_entry" 2>/dev/null || echo "$_entry")" ]; then
+    # readlink -f 为 GNU 扩展（macOS 干净机无 coreutils，G4b 2026-09-08）：
+    # 改用 -L 判软链 + readlink 取目标，语义等价（拷贝体 → 自身路径）。
+    local _entry_resolved="$_entry"
+    if [ -L "$_entry" ]; then
+        _entry_resolved="$(readlink "$_entry" 2>/dev/null || echo "$_entry")"
+    fi
+    if [ -s "$_SOURCE" ] && [ "$_SOURCE" != "$_entry_resolved" ]; then
         if cp -f "$_SOURCE" "$_entry" 2>/dev/null && chmod 755 "$_entry"; then
             log info "入口启动器已重生成（no-args 将自动拉起守护进程群）"
         else
@@ -920,10 +1043,10 @@ apply_package() { # <tarball> [expect_sha]
             log warn "入口启动器恢复失败，请运行 install.sh --reinstall"
         fi
     fi
-    # 回滚备份只保留最近 3 份（问题 11：rollback 目录无限膨胀清理）
-    ls -1d "$AIRY_HOME"/.rollback/*/ 2>/dev/null | sort -r | tail -n +4 | while read -r old; do
-        rm -rf "$old"
-    done
+    # 回滚备份保留策略（2026-09-07 社区要求"最多保留上一版"）：仅保留最新
+    # 1 份（问题 11：rollback 目录无限膨胀清理；保留多于一份跨多次更新后
+    # 无法对应"上一版"）
+    prune_rollback
     log ok "更新完成: v${new_ver}（重跑 airymaxrt 生效）"
     return 0
 }
@@ -976,31 +1099,51 @@ airymaxrt_update() { # update [--check] [--yes] [--channel stable|beta|rc] [--ro
         esac
         shift
     done
-    # 当前版本/通道（install.env 固化，安装信息只读）
-    local cur_ver="" cur_ch="stable"
+    # 当前版本/通道/制品 sha（install.env 固化，安装信息只读。sha 为同 tag
+    # 修复重发检测依据，2026-09-07 起每次更新成功后回写）
+    local cur_ver="" cur_ch="stable" cur_sha=""
     if [ -f "$inst_env" ]; then
         cur_ver="$(sed -n 's/^AIRY_VERSION=//p' "$inst_env" | head -1)"
         cur_ch="$(sed -n 's/^AIRY_CHANNEL=//p' "$inst_env" | head -1)"
+        cur_sha="$(sed -n 's/^AIRY_ARTIFACT_SHA256=//p' "$inst_env" | head -1)"
     fi
     CHANNEL="${CHANNEL:-${cur_ch:-stable}}"
     case "$CHANNEL" in stable|beta|rc) ;; *) log error "通道无效: $CHANNEL（stable|beta|rc）"; return 2 ;; esac
 
-    # 回滚
+    # 回滚（2026-09-07：备份按目录 mtime 排序 ls -1dt 选最新——旧实现按
+    # 目录名 sort -r（v<版本>-<时间戳>）跨版本号边界会选错版本，如 v0.1.9-*
+    # 字典序大于 v0.1.10-*，导致"回滚到更旧版本"）
     if [ "$ROLLBACK" = "1" ]; then
-        local rb="$(ls -1d "$AIRY_HOME"/.rollback/*/ 2>/dev/null | sort -r | head -1)"
+        local rb="$(ls -1dt "$AIRY_HOME"/.rollback/*/ 2>/dev/null | head -1)"
         [ -n "$rb" ] || { log error "无可用回滚备份（.rollback/ 为空）"; return 1; }
         log info "回滚到: $(basename "$rb")…"
-        for d in bin lib include share; do
-            [ -d "$rb/$d" ] && cp -rf "$rb/$d"/* "$AIRY_HOME/$d/" 2>/dev/null || true
-        done
-        # 恢复版本号（备份目录名 = <版本>-<时间戳>；剥离时间戳后缀，
-        # 否则 AIRY_VERSION 被写成 v0.1.6g-20260831191248，后续版本比较错乱）
+        # 镜像回拷：先清目标再整目录恢复（与 apply_package 镜像同步对称，
+        # 叠加式恢复会残留更新版独有文件，形成半新半旧）
+        if ! restore_from_backup "$rb"; then
+            log error "回滚恢复不完整，请执行 airymaxrt reinstall 修复"
+            return 1
+        fi
+        # D8（2026-09-07）：回收运行中 daemon——回滚只换磁盘文件，更新后
+        # 拉起的新版 daemon（或残留进程）仍执行替换前代码，必须回收后由
+        # 下次启动自然拉起回滚版（与 apply_package 成功路径同语义）。
+        stop_running_daemons
         if [ -f "$inst_env" ]; then
-            local rb_ver="$(basename "$rb")"
-            rb_ver="$(printf '%s' "$rb_ver" | sed -E 's/-[0-9]{14}$//')"
-            if [ "$rb_ver" != "pre-update" ]; then
-                sed_inplace "s|^AIRY_VERSION=.*|AIRY_VERSION=${rb_ver}|" "$inst_env" || \
-                    printf 'AIRY_VERSION=%s\n' "$rb_ver" >> "$inst_env"
+            if [ -f "$rb/install.env" ]; then
+                # 2026-09-07 起备份含 install.env 快照：版本号 + 制品 sha
+                # 一并还原，避免回滚后残留新版本 sha 造成"同版本修复"误判
+                cp -f "$rb/install.env" "$inst_env"
+                chmod 600 "$inst_env" 2>/dev/null || true
+                log info "install.env 已随备份还原（AIRY_VERSION/制品 sha 与回滚前一致）"
+            else
+                # 旧版备份无 env 快照：按目录名 <版本>-<时间戳> 还原版本号
+                #（剥离时间戳后缀，否则 AIRY_VERSION 被写成
+                # v0.1.6g-20260831191248，后续版本比较错乱）
+                local rb_ver="$(basename "$rb")"
+                rb_ver="$(printf '%s' "$rb_ver" | sed -E 's/-[0-9]{14}$//')"
+                if [ "$rb_ver" != "pre-update" ]; then
+                    sed_inplace "s|^AIRY_VERSION=.*|AIRY_VERSION=${rb_ver}|" "$inst_env" || \
+                        printf 'AIRY_VERSION=%s\n' "$rb_ver" >> "$inst_env"
+                fi
             fi
         fi
         log ok "回滚完成（重新运行 airymaxrt 生效）"
@@ -1039,29 +1182,51 @@ airymaxrt_update() { # update [--check] [--yes] [--channel stable|beta|rc] [--ro
     local latest="$(manifest_get "$TMPD/manifest.json" latest)"
     [ -n "$latest" ] || { log error "manifest 解析失败"; rm -rf "$TMPD"; return 1; }
     local cmp="$(ver_cmp "${cur_ver:-0.0.0}" "$latest")"
-    if [ "$cmp" = "0" ] || [ "$cmp" = "1" ]; then
-        log info "已是最新: ${cur_ver:-<未安装>}（最新 ${latest}）"
-        rm -rf "$TMPD"
-        return 0
+    if [ "$cmp" = "1" ]; then
+        # 当前版本高于通道目标（异常，多为通道回退/多通道切换）→ 视为已最新
+        log info "已是最新: ${cur_ver:-<未安装>}（通道 ${CHANNEL} 最新 ${latest}）"
+        rm -rf "$TMPD"; return 0
     fi
-    log info "发现新版本: ${cur_ver:-<未安装>} → ${latest}（${CHANNEL}）"
-    [ "$CHECK" = "1" ] && { log info "仅检查模式：更新可用"; rm -rf "$TMPD"; return 0; }
-    # 当前平台制品
+    # 当前平台制品解析提前（2026-09-07）：同版本 sha 门禁需目标制品 sha
+    # 与 install.env 记录的 AIRY_ARTIFACT_SHA256 比对（同 tag 修复重发检测）
     local plat="$(runtime_platform)"
     local art_url art_sha
-    art_url="$(manifest_get "$TMPD/manifest.json" "artifact:${plat}" | sed -n 1p)"
-    art_sha="$(manifest_get "$TMPD/manifest.json" "artifact:${plat}" | sed -n 2p)"
-    # 平台键兼容（三代 manifest）：本版主键 = OS-架构族-位宽（如
-    # linux-x86-64）；旧两代（gen2：linux-x64 等 / gen1：linux-x86_64 等）
-    # 未命中时按 plat_legacy_name 候选依序反查（发布侧 manifest 亦含全部
-    # 别名键，此处兜底旧 manifest）。
-    if [ -z "$art_url" ]; then
-        for legacy in $(plat_legacy_name "$plat"); do
-            [ -n "$legacy" ] || continue
-            art_url="$(manifest_get "$TMPD/manifest.json" "artifact:${legacy}" | sed -n 1p)"
-            art_sha="$(manifest_get "$TMPD/manifest.json" "artifact:${legacy}" | sed -n 2p)"
-            [ -n "$art_url" ] && { log warn "平台键 ${plat} 未命中，已用兼容命名 ${legacy}"; break; }
-        done
+    if command -v python3 >/dev/null 2>&1; then
+        art_url="$(manifest_get "$TMPD/manifest.json" "artifact:${plat}" | sed -n 1p)"
+        art_sha="$(manifest_get "$TMPD/manifest.json" "artifact:${plat}" | sed -n 2p)"
+        # 平台键兼容（三代 manifest）：本版主键 = OS-架构族-位宽（如
+        # linux-x86-64）；旧两代（gen2：linux-x64 等 / gen1：linux-x86_64 等）
+        # 未命中时按 plat_legacy_name 候选依序反查（发布侧 manifest 亦含全部
+        # 别名键，此处兜底旧 manifest）。
+        if [ -z "$art_url" ] && [ -z "$art_sha" ]; then
+            for legacy in $(plat_legacy_name "$plat"); do
+                [ -n "$legacy" ] || continue
+                art_url="$(manifest_get "$TMPD/manifest.json" "artifact:${legacy}" | sed -n 1p)"
+                art_sha="$(manifest_get "$TMPD/manifest.json" "artifact:${legacy}" | sed -n 2p)"
+                { [ -n "$art_url" ] || [ -n "$art_sha" ]; } && { log warn "平台键 ${plat} 未命中，已用兼容命名 ${legacy}"; break; }
+            done
+        fi
+    elif [ "$cmp" != "1" ]; then
+        # D7 fail-closed（2026-09-07）：无 python3 时嵌套制品字段无可靠解析
+        # （旧 sed 回退为 no-op，同版本重发被静默判"已是最新"、新版本误报
+        # "平台无制品"，均为 fail-open）。凡需下载或 sha 比对即明确拒绝，
+        # 指引离线包路径（离线更新不依赖 manifest 解析，全环境可用）。
+        log error "当前环境缺 python3，无法安全解析远程 manifest 制品字段"
+        log error "请安装 python3 后重试；或使用离线包更新："
+        log error "  airymaxrt update --file <tarball> --sha256 <hash>"
+        rm -rf "$TMPD"; return 1
+    fi
+    if [ "$cmp" = "0" ]; then
+        # 同版本 sha 门禁（2026-09-07）：仅比版本号收不到同 tag 修复重发——
+        # manifest 目标版本 == 当前 AIRY_VERSION 但目标制品 sha256 与已装记录
+        # 不同即视为可更新；目标 sha 缺失或与已装记录一致 → 已是最新
+        if [ -z "$art_sha" ] || [ "$art_sha" = "${cur_sha:-}" ]; then
+            log info "已是最新: ${cur_ver:-<未安装>}（最新 ${latest}）"
+            rm -rf "$TMPD"; return 0
+        fi
+        log info "同版本制品变更: ${cur_ver:-<未安装>}（sha256 与已装记录不同，按修复重发更新）"
+    else
+        log info "发现新版本: ${cur_ver:-<未安装>} → ${latest}（${CHANNEL}）"
     fi
     [ -n "$art_url" ] || {
         log error "当前平台 ${plat} 无可用制品"
@@ -1069,6 +1234,7 @@ airymaxrt_update() { # update [--check] [--yes] [--channel stable|beta|rc] [--ro
         log error "请重新执行一键安装命令（见官网 install 指南）更新安装器后重试。"
         rm -rf "$TMPD"; return 1
     }
+    [ "$CHECK" = "1" ] && { log info "仅检查模式：更新可用"; rm -rf "$TMPD"; return 0; }
     local tarball="$TMPD/$(basename "${art_url%%\?*}")"
     log info "下载制品: ${art_url}"
     syscurl -fsSL --max-time 600 -o "$tarball" "$art_url" || { log error "制品下载失败"; rm -rf "$TMPD"; return 1; }
@@ -1078,6 +1244,37 @@ airymaxrt_update() { # update [--check] [--yes] [--channel stable|beta|rc] [--ro
     rm -rf "$TMPD"
     [ "$rc" = "0" ] && stop_running_daemons
     return $rc
+}
+
+# ── 安装器定位（uninstall/reinstall 委托执行，2026-09-07 加固）───────────
+# $AIRY_HOME/scripts/install.sh 由安装器自托管（install.sh finalize_install），
+# 但管道安装（curl | sh）等场景缺失——经 fetch_repo_file 从官方仓 main 分支
+# 在线拉取兜底（与安装器自身 installer_self_bootstrap 同源：openairymax/agentrt
+# 仓 scripts/install.sh）。输出脚本路径到 stdout（log 全部走 stderr，不污染）。
+# TODO(加固残余项)：可扩展多源重试（github 镜像）与断点续传。
+ensure_installer() { # <动作名（uninstall|reinstall）> → stdout 路径；失败为空且返回 1
+    local act="$1" inst="${AIRY_HOME}/scripts/install.sh"
+    if [ -f "$inst" ]; then
+        log debug "安装器就绪: $inst"
+        printf '%s\n' "$inst"
+        return 0
+    fi
+    log warn "${act}: 本机未找到安装器脚本 $inst"
+    if [ -n "${AIRY_NO_NETWORK:-}" ] || ! command -v curl >/dev/null 2>&1; then
+        log error "${act}: 无法在线拉取安装器（AIRY_NO_NETWORK 已设或 curl 不可用）"
+        return 1
+    fi
+    local fetched="$AIRY_HOME/tmp/install.$$.sh"
+    mkdir -p "$AIRY_HOME/tmp" 2>/dev/null || true
+    if fetch_repo_file "scripts/install.sh" "$fetched"; then
+        chmod 755 "$fetched"
+        log warn "${act}: 本机安装器缺失，已从官方仓在线拉取兜底: $fetched"
+        printf '%s\n' "$fetched"
+        return 0
+    fi
+    rm -f "$fetched"
+    log error "${act}: 在线拉取安装器失败（请检查网络后重试）"
+    return 1
 }
 
 # ── 子命令：help / status / doctor / uninstall ──────────────────────────────
@@ -1404,37 +1601,61 @@ case "$CMD" in
         exit 0
         ;;
     uninstall)
-        inst="${AIRY_HOME}/scripts/install.sh"
-        if [ -f "$inst" ]; then
-            log info "委托安装器执行卸载: $inst"
-            shift
-            exec sh "$inst" --uninstall "$@"
-        else
-            log warn "未找到安装器脚本，请手动删除: $AIRY_HOME"
+        inst="$(ensure_installer uninstall)" || {
+            log error "请重新执行官方一键安装命令（见官网 install 指南）后再卸载，"
+            log error "或手动删除: $AIRY_HOME"
             exit 1
+        }
+        log info "委托安装器执行卸载: $inst"
+        shift
+        # 0.1.6h 同款修复（对齐下方 reinstall 分支）：非默认位置安装的用户
+        # 卸载到错误路径（install.sh 强制忽略环境变量 AIRY_HOME）；显式传
+        # --prefix，否则 do_uninstall 找不到 install.env → "未检测到安装"
+        # 以 0 退出，真实安装原封不动残留（0.1.13 C2a 复核实证）。
+        if [ "$AIRY_HOME" != "${HOME}/.airymaxrt" ]; then
+            exec sh "$inst" --uninstall --prefix "$AIRY_HOME" "$@"
         fi
+        exec sh "$inst" --uninstall "$@"
         ;;
     reinstall)
-        inst="${AIRY_HOME}/scripts/install.sh"
-        if [ -f "$inst" ]; then
-            log info "委托安装器执行重装: $inst"
-            shift
-            # 0.1.6h 修复：非默认位置安装的用户重装到错误路径（install.sh
-            # 强制忽略环境变量 AIRY_HOME，防残留劫持）；显式传 --prefix。
-            if [ "$AIRY_HOME" != "${HOME}/.airymaxrt" ]; then
-                exec sh "$inst" --reinstall --prefix "$AIRY_HOME" "$@"
-            fi
-            exec sh "$inst" --reinstall "$@"
-        else
-            log warn "未找到安装器脚本: $inst（请重新运行官方 install.sh 一键安装）"
+        inst="$(ensure_installer reinstall)" || {
+            log error "请重新执行官方一键安装命令（见官网 install 指南）以完成重装"
             exit 1
+        }
+        log info "委托安装器执行重装: $inst"
+        shift
+        # 0.1.6h 修复：非默认位置安装的用户重装到错误路径（install.sh
+        # 强制忽略环境变量 AIRY_HOME，防残留劫持）；显式传 --prefix。
+        if [ "$AIRY_HOME" != "${HOME}/.airymaxrt" ]; then
+            exec sh "$inst" --reinstall --prefix "$AIRY_HOME" "$@"
         fi
+        exec sh "$inst" --reinstall "$@"
         ;;
     update)
         # 自更新器：检查/执行官方通道更新（stable|beta），GPG 验签 + sha256 校验
         shift
         airymaxrt_update "$@"
         exit $?
+        ;;
+esac
+# D11（2026-09-07）：管理命令拼写防护——首参命中已知管理命令的真前缀
+# （如 "updat"/"instal"/"stat"）时多为 typo，静默透传前端造成"命令没
+# 反应"的困惑；列出相近命令并拒绝。非命令形首参（agent 文件名、
+# --flag 启动参数）不受影响，正常透传。
+_near=""
+case "$CMD" in
+    ""|-*) ;;
+    *)
+        _exact=""
+        for _cmd in help cli profile monitor status doctor logs uninstall reinstall update; do
+            [ "$_cmd" = "$CMD" ] && { _exact=1; break; }
+            case "$_cmd" in "$CMD"*) _near="$_near $_cmd" ;; esac
+        done
+        if [ -z "$_exact" ] && [ -n "$_near" ]; then
+            log error "未知命令: $CMD（是否想用:${_near}？）"
+            log error "运行 airymaxrt help 查看全部命令"
+            exit 2
+        fi
         ;;
 esac
 # 正常启动：透传剩余参数给 TUI
@@ -1835,7 +2056,7 @@ else
         GW_START="no"
         log info "gateway 已在线（$GATEWAY_URL），复用（生命周期不受本次会话管理）"
     else
-        for _p in "$GATEWAY_PORT" $(seq 8083 8090); do
+        for _p in "$GATEWAY_PORT" 8083 8084 8085 8086 8087 8088 8089 8090; do
             if _gw_port_available "$_p"; then
                 if [ "$_p" != "$GATEWAY_PORT" ]; then
                     log warn "端口 $GATEWAY_PORT 被占用（残留连接），gateway 改用端口 $_p"

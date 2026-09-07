@@ -193,6 +193,28 @@ syscurl() {
     fi
 }
 
+# 便携 sha256（G4b/macOS 干净机 2026-09-08）：核心工具链不含 coreutils，
+# 无 sha256sum 命令；统一走 shasum -a 256 回退。两分支输出格式均为
+# "<hex>  <path>"（GNU 与 BSD shasum 一致），awk 取首列即得 hex。
+sha256_file() { # <file> → hex；无可用实现输出空
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" 2>/dev/null | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" 2>/dev/null | awk '{print $1}'
+    else
+        printf ''
+    fi
+}
+sha256_stdin() { # stdin → hex；无可用实现输出空
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum 2>/dev/null | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 2>/dev/null | awk '{print $1}'
+    else
+        printf ''
+    fi
+}
+
 # 幂等写 install.env（0.1.6g）：先删除同名键再追加——多次安装/引导不会
 # 让键重复膨胀（此前 `>>` 直接追加，重装后 AIRY_PATH_RC 等出现多行）。
 # 跨平台：grep -v + mv，不依赖 sed -i 的 GNU/BSD 语法差异（macOS 兼容）。
@@ -246,14 +268,14 @@ installer_self_bootstrap() {
     command -v python3 >/dev/null 2>&1 || return 0
     command -v curl >/dev/null 2>&1 || return 0
     local local_sha
-    local_sha="$(sha256sum "$0" 2>/dev/null | awk '{print $1}')"
+    local_sha="$(sha256_file "$0")"
     [ -n "$local_sha" ] || return 0
     local api="https://api.atomgit.com/api/v5/repos/openairymax/agentrt/contents/scripts/install.sh?ref=main"
     local tmp remote_content remote_sha
     tmp="$(syscurl -fsSL --max-time 30 "$api" 2>/dev/null)" || return 0
     remote_content="$(printf '%s' "$tmp" | python3 -c 'import sys,json,base64;d=json.load(sys.stdin);sys.stdout.write(base64.b64decode(d.get("content","")).decode())' 2>/dev/null)" || return 0
     [ -n "$remote_content" ] || return 0
-    remote_sha="$(printf '%s' "$remote_content" | sha256sum | awk '{print $1}')"
+    remote_sha="$(printf '%s' "$remote_content" | sha256_stdin)"
     [ -n "$remote_sha" ] || return 0
     [ "$remote_sha" = "$local_sha" ] && return 0
     log_info "检测到安装器新版本，切换到远程最新版执行…"
@@ -672,7 +694,8 @@ install_binary() {
         # 缓存自检（期望 sha256 已知）：本地缓存不符期望 → 删后重下。
         # 这覆盖同 tag 修复重传 / 上次下载残留 / CDN 缓存陈旧三类场景。
         if [ -n "$expect_sha" ]; then
-            if ! printf '%s  %s\n' "$expect_sha" "$tarball" | sha256sum -c - >/dev/null 2>&1; then
+            _actual_sha="$(sha256_file "$tarball")"
+            if [ "$_actual_sha" != "$expect_sha" ]; then
                 # 本地离线包：无网络缓存可重下，不删除用户文件，直接 fail-closed
                 if [ "$local_src" = "1" ]; then
                     log_err "sha256 校验失败：离线包与校验值不一致，拒绝安装"
@@ -700,7 +723,7 @@ install_binary() {
     # 记录已安装制品 sha256（固化到 install.env）。update 侧"同版本修复重发
     # 检测"的依据（0.1.11）：官方同 tag 修复重发时版本号不变而 sha 变化，
     # 仅比版本会误报"已是最新"，导致修复补丁收不到。以实际校验通过的文件为准。
-    AIRY_ARTIFACT_SHA256="$(sha256sum "$tarball" 2>/dev/null | awk '{print $1}')"
+    AIRY_ARTIFACT_SHA256="$(sha256_file "$tarball")"
     # 包内架构自校验：tarball 根含 platform-* 标识文件时交叉校验，防止
     # 下载到异架构包后静默安装（跨架构 daemon 启动即崩溃）。三代标记
     # 兼容：本版生成 platform-<架构族-位宽>（如 platform-x86-64），旧
