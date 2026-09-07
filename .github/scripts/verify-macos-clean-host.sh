@@ -76,8 +76,10 @@ info "拉起 daemon 群（完整启动器默认流程，健康等待含 gateway�
 CTRL="$AH/tmp/g4b-ctrl.$$"
 mkdir -p "$AH/tmp" 2>/dev/null || true
 rm -f "$CTRL"; mkfifo "$CTRL" 2>/dev/null || true
-# 保持 stdin 写端打开：非 TTY 前端（airy_cli -p）读 stdin，EOF 会让会话退出
-exec 9>"$CTRL"
+# 保持 stdin 写端打开：非 TTY 前端（airy_cli -p）读 stdin，EOF 会让会话退出。
+# 注意必须以读写方式（<>）打开 FIFO：只写（>）会在无读者时阻塞 exec，而
+# 读者（启动器）要等本行返回后才启动——互相等待死锁（G4b 实测修正）。
+exec 9<>"$CTRL"
 LOGF="$AH/logs/g4b-clean-host.out"
 mkdir -p "$AH/logs" 2>/dev/null || true
 bash "$AH/bin/airymaxrt-full" <"$CTRL" >"$LOGF" 2>&1 &
