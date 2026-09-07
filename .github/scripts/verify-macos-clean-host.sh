@@ -94,14 +94,27 @@ if [ -s "$AH/run/gateway.port" ]; then
 fi
 GWP="${GWP:-8080}"
 _GW_OK=0
-for _ in $(seq 1 120); do
+_i=0
+while [ "$_i" -lt 120 ]; do
     if (exec 3<>"/dev/tcp/127.0.0.1/$GWP") 2>/dev/null; then
         exec 3>&- 3<&- 2>/dev/null || true
         _GW_OK=1; break
     fi
+    _i=$((_i + 1))
     sleep 1
 done
-[ "$_GW_OK" = "1" ] || { tail -n 40 "$LOGF" 2>/dev/null | sed 's/^/    /' || true; fail "gateway TCP 不可达: 127.0.0.1:$GWP"; }
+if [ "$_GW_OK" != "1" ]; then
+    # 日志/状态转 annotation（GitHub job 日志需 admin，annotation 匿名 API
+    # 可读，是 CI 台账的证据通道）。逐行 ::error 保证多行都可见。
+    echo "::error::gateway TCP 不可达: 127.0.0.1:${GWP}"
+    echo "::error::-- launcher 日志尾部 --"
+    tail -n 60 "$LOGF" 2>/dev/null | sed 's/^/::error::/; s/%/%25/g; s/\r//g' | head -60 || true
+    echo "::error::-- run/ 目录 --"
+    ls -1 "$AH/run" 2>/dev/null | sed 's/^/::error::/' | head -20 || true
+    echo "::error::-- gateway_d.out --"
+    tail -n 20 "$AH/logs/gateway_d.out" 2>/dev/null | sed 's/^/::error::/; s/%/%25/g; s/\r//g' | head -20 || true
+    exit 1
+fi
 info "gateway online（127.0.0.1:$GWP）"
 
 # ─── 阶段 5：CLI 冒烟 ─────────────────────────────────────────────────────
