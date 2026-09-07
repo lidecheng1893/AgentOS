@@ -64,7 +64,12 @@ jobs:
           ls -la agentrt-*
 
       - name: Run G4b clean-host verify
-        run: bash .github/scripts/verify-macos-clean-host.sh \
+        run: |
+          echo "PWD=$PWD"; ls -la | head -20
+          echo "--- scripts/ ---"; ls -la scripts 2>&1 | head -20
+          echo "--- latest/ ---"; ls -la latest 2>&1 | head
+          test -f scripts/install.sh && echo "install.sh present"
+          bash .github/scripts/verify-macos-clean-host.sh \
             "$PWD/scripts/install.sh" \
             "$PWD/agentrt-${VERSION}-${SUFFIX}.tar.gz" \
             "$PWD/latest/airymaxrt"
