@@ -19,7 +19,7 @@ heapstore / protocols）作为 git 子模块，对外提供微内核原语、认
 安全穹顶、IPC 协议、网关服务和常驻守护进程等 OS 级机制。
 
 **拓扑约定（2026-09 架构裁决）**：`airymaxhub` 伞仓为纯容器（superproject），
-**不承载任何流水线**；CI/CD（构建 / 测试 / codegen / SSoT / 镜像同步 / 六平台发布）
+**不承载任何流水线**；CI/CD（构建 / 测试 / codegen / SSoT / 镜像同步 / 平台矩阵发布）
 全部下沉到本 agentrt 仓，因为 agentrt 的版本发布语义（VERSION / CHANGELOG /
 7 叶子聚合）都以本仓为唯一宿主。atomgit 为 SSoT 主托管，GitHub / Gitee 仅为镜像
 与执行面（按需经各自 API/MCP 同步，不做本地循环触发）。
@@ -48,7 +48,7 @@ heapstore / protocols）作为 git 子模块，对外提供微内核原语、认
     ├── build-test.yml           # 构建 / 测试门禁（Linux 覆盖率 / macOS / Windows）
     ├── build-toolchain-images.yml  # 交叉工具链 GHCR 镜像构建推送（qemu 腿基础设施）
     ├── codegen-check.yml        # syscall.xml SSoT 漂移校验
-    ├── release.yml              # 跨平台发布（8 构建腿 + release + publish）
+    ├── release.yml              # 跨平台发布（7 产品腿 + riscv canary + 聚合 + e2e 门禁 + publish）
     └── sync-mirror.yml          # atomgit(SSoT) → GitHub / Gitee 镜像同步触发器
 ```
 
@@ -77,17 +77,18 @@ heapstore / protocols）作为 git 子模块，对外提供微内核原语、认
 审批不下沉），拆成三条后 release 原子性要靠三线对齐，代价更高。当前形态 =
 **一条发布流水线（release.yml）+ 三条门禁（build-test.yml 的 linux/macos/
 windows job）+ 一套复用件（lf-* / 镜像 / 脚本）**，即"逻辑上三平台、物理
-上一份"。release.yml 若超 800 行且编排复杂度继续增长，再评估 workflow_call
-拆腿（Environment 审批必须留在主文件）。
+上一份"。release.yml 现约 1300 行（B9 治理评估成文：e2e-clean-room / U9 升级
+路径 / REQUIRED_BIN 预检随 rc 实证持续叠加，编排复杂度仍在单文件承载范围内；
+若继续增长再评估 workflow_call 拆腿，Environment 审批必须留在主文件）。
 
 ## 工作流
 
 | workflow | 触发 | 说明 |
 |----------|------|------|
-| `build-test.yml` | `push main` / `pull_request` / `workflow_dispatch` | 三平台高频门禁：Linux（Debug + ctest + gcovr 覆盖率阈值）/ macOS（Homebrew）/ Windows（vcpkg + MSVC，`continue-on-error` 通告性，G1 全绿后升硬门禁） |
+| `build-test.yml` | `push main` / `pull_request` / `workflow_dispatch` | 三平台高频门禁：Linux（Debug + ctest + gcovr 覆盖率阈值）/ macOS（Homebrew）/ Windows（vcpkg + MSVC）。G2 达成（0.1.13）：windows ctest 35→全绿，`windows-build` 为 required 硬门禁 |
 | `build-toolchain-images.yml` | `push main`（Dockerfile/相关变更）/ `workflow_dispatch` | 交叉工具链镜像（arm64/arm32/i386 容器腿）构建并推送 GHCR，digest 钉版供 release 腿引用 |
 | `codegen-check.yml` | `push main` / `pull_request` / `workflow_dispatch` | `syscall_gen.py --check` 校验 `syscall.xml` 与生成产物漂移 |
-| `release.yml` | `tag v*` 推送 / `workflow_dispatch`（输入 version） | 跨平台构建腿（linux-x64 / linux-arm64 / linux-arm32 / linux-riscv64 / linux-x86-32 / macos-arm64 / macos-x86-64 / windows-x64）→ cosign + GPG 签名 → 汇聚 publish（26 资产一次落库 + manifest.latest）atomgit 官方 + GitHub Release 镜像；windows 腿当前 canary（publish REQUIRED_BIN 预检过 = 升 gate 判据） |
+| `release.yml` | `tag v*` 推送 / `workflow_dispatch`（输入 version） | 发布链（G1 起 windows 为 required gate）：linux-x86-64 / linux-arm-64 / linux-arm-32 / linux-x86-32 / linux-riscv-64（canary）/ macos-arm-64 / macos-x86-64 / windows-x86-64 → 聚合 `release` → **`e2e-clean-room`**（H2 洁净容器：安装 → daemon 群 → CLI 冒烟 + **U9 旧版升级路径**，publish 前置门禁）→ `publish`（Environment 审批：REQUIRED_BIN/SUBTREE 预检 + cosign/GPG 签名 + 26 资产一次落库 + manifest.latest）。publish 通过后拉取 stable manifest 的 prev 制品在下一 rc/发布自动回归 U9 |
 | `sync-mirror.yml` | `push main` / `workflow_dispatch` | `sync-mirror.sh`：agentrt + 7 叶子从 atomgit(SSoT) 同步至 GitHub / Gitee（缺仓自动创建，atoms 私有，错误隔离汇总） |
 
 ## 布局与子模块
@@ -96,8 +97,8 @@ windows job）+ 一套复用件（lf-* / 镜像 / 脚本）**，即"逻辑上三
   一次性拉齐 7 个叶子（SHA 由 agentrt 树 gitlink 钉定）。私有叶子 `atoms` 经
   `GH_TOKEN`（org PAT，`~/.netrc`）认证。
 - release 链额外克隆 sibling 数据到**历史相对路径**（`tools/` 与
-  `agent-workload/{sdk,ecosystem}`，来自 GitHub 镜像期 clone），使打包 / 发布脚本的
-  路径引用与伞仓时代一致、无需逐处改写：
+  `agent-workload/{sdk,ecosystem}`，来自 GitHub 镜像期 clone，**GitHub 侧手动维护，
+  见"镜像覆盖范围"节**），使打包 / 发布脚本的路径引用与伞仓时代一致、无需逐处改写：
   - `tools/`：`lib-builddeps.sh` / `ops/templates/*`（config 模板）/ `ops/bin/agentrt-bootstrap.sh` / `ci/release/publish-release.sh` 等；
   - `agent-workload/sdk/tui`：Rust TUI（`agentrt-tui`）构建源；
   - `agent-workload/ecosystem`：Python 运行时（agents / manager 配置 / markets maths-toolkit）。
@@ -120,6 +121,26 @@ sibling clone 凭据统一走 `GH_TOKEN`。
 同步模型：源 = atomgit(SSoT)，`clone --mirror` 抓全量 refs 后仅 push **heads + tags**
 （force 与 SSoT 一致，不透传 atomgit 平台内部 ref）；子模块树以各仓 `HEAD:.gitmodules`
 BFS 解析；缺仓自动创建（atoms 私有）；每仓错误隔离、末尾汇总。
+
+### 镜像覆盖范围（rc2 教训：tools 等 sibling 仓 GitHub 侧需手动维护）
+
+`sync-mirror.yml` 只自动同步 **agentrt + 7 叶子**。发布链在 CI 克隆的 sibling 数据
+（`_tools` / `agent-workload/{sdk,ecosystem}`，见下节）来自 **GitHub 镜像**，而
+GitHub 侧并无自动同步这些仓的通道——rc2 实证：`github.com/openairymax/tools`
+落后 5 提交、缺 `e2e-clean-room.sh`，导致 release 的 e2e job exit 127（脚本缺失），
+publish 被正确阻塞但失败归因一度被误导为容器内阶段失败。
+
+**维护要求**：tools / sdk / ecosystem / agent-workload / docs-closed 等顶层仓在
+atomgit 提交后，若其内容被 GitHub 侧 CI 消费（release 打包脚本、bootstrap、
+e2e 脚本、TUI/Python 运行时），须手动把 `main` 快进同步到 GitHub：
+
+```bash
+git -C <repo> push git@github.com:openairymax/<repo>.git main:main
+```
+
+无分叉时快进即可（镜像终态与 SSoT 一致）；分叉时须先对齐 SSoT 再推。
+0.1.13 收口项：为这些仓补一条自动镜像通道（或在 release 链改用 atomgit 拉取），
+避免依赖人工记忆。
 
 ### 发布 tag 与重复 Release run（H3/P19 SOP，2026-09-06 更正根因）
 
