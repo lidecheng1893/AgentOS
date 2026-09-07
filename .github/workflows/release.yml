@@ -85,17 +85,13 @@ jobs:
               -DCMAKE_INSTALL_PREFIX="$PWD/$STAGE_DIR"
             cmake --build "$BUILD_DIR" -j"$(nproc)"
             cmake --install "$BUILD_DIR"
-            # Rust TUI（SSoT：build-tui.sh 收敛 header 注入 + cargo 缺失兜底
-            # + 失败降级不阻断；CARGO_TARGET_DIR 指向容器 /tmp，禁止落源码树）
-            bash /src/.github/scripts/build-tui.sh agent-workload/sdk/tui "$STAGE_DIR/bin"
-            # Python 运行时依赖（完全体包 lib/）
-            mkdir -p "$STAGE_DIR/lib"
-            for p in agent-workload/ecosystem/agents/airymax_agents \
-                     agent-workload/ecosystem/agents/airymax_agents_rs \
-                     agent-workload/ecosystem/agents/orchestration \
-                     agent-workload/sdk/sdk-python/agentrt; do
-              [ -d "$p" ] && cp -r "$p" "$STAGE_DIR/lib/" || true
-            done
+            # Rust TUI（SSoT：build-tui.sh 收敛 header 注入 + cargo 缺失兜底；
+            # B1 fail-hard——x86-64 为门禁产品腿，TUI 属 REQUIRED_SUBTREE）
+            AIRY_TUI_FAIL_HARD=1 bash /src/.github/scripts/build-tui.sh agent-workload/sdk/tui "$STAGE_DIR/bin"
+            # Python 运行时依赖（完全体包 lib/，B1 fail-closed：子树缺失即腿失败，
+            # 不再静默吞缺件——C2b/U11 教训，发布预检仅作兜底）
+            bash /src/.github/scripts/copy-python-runtime.sh "$STAGE_DIR" \
+              || { echo "::error::python 运行时四子树拷贝失败（lib/ 完整性必需）"; exit 1; }
             # 完全体 finalize：容器内收集运行时 .so + fail-closed 校验
             bash /src/.github/scripts/finalize-linux-libs.sh "$STAGE_DIR" /src/_tools
 
@@ -179,15 +175,11 @@ jobs:
       - name: Build TUI + copy Python runtime
         run: |
           # TUI 构建收敛共享脚本（airymax header 注入 + cargo + 部署，见
-          # .github/scripts/build-tui.sh；v0.1.10 run_stream header 缺失回归）
-          bash .github/scripts/build-tui.sh agent-workload/sdk/tui "${{ env.STAGE_DIR }}/bin"
-          mkdir -p "${{ env.STAGE_DIR }}/lib"
-          for p in agent-workload/ecosystem/agents/airymax_agents \
-                   agent-workload/ecosystem/agents/airymax_agents_rs \
-                   agent-workload/ecosystem/agents/orchestration \
-                   agent-workload/sdk/sdk-python/agentrt; do
-            [ -d "$p" ] && cp -r "$p" "${{ env.STAGE_DIR }}/lib/" || true
-          done
+          # .github/scripts/build-tui.sh；B1 fail-hard——macOS 为门禁产品腿）
+          AIRY_TUI_FAIL_HARD=1 bash .github/scripts/build-tui.sh agent-workload/sdk/tui "${{ env.STAGE_DIR }}/bin"
+          # Python 运行时依赖（完全体包 lib/，B1 fail-closed）
+          bash .github/scripts/copy-python-runtime.sh "${{ env.STAGE_DIR }}" \
+            || { echo "::error::python 运行时四子树拷贝失败（lib/ 完整性必需）"; exit 1; }
 
       # G4/U6（0.1.13）：macOS dylib 自包含——otool -L 递归收集非系统 dylib 入
       # lib/，install_name_tool 重写为 @executable_path/../lib/，ad-hoc 重签，
@@ -284,15 +276,11 @@ jobs:
       - name: Build TUI + copy Python runtime
         run: |
           # TUI 构建收敛共享脚本（airymax header 注入 + cargo + 部署，见
-          # .github/scripts/build-tui.sh；v0.1.10 run_stream header 缺失回归）
-          bash .github/scripts/build-tui.sh agent-workload/sdk/tui "${{ env.STAGE_DIR }}/bin"
-          mkdir -p "${{ env.STAGE_DIR }}/lib"
-          for p in agent-workload/ecosystem/agents/airymax_agents \
-                   agent-workload/ecosystem/agents/airymax_agents_rs \
-                   agent-workload/ecosystem/agents/orchestration \
-                   agent-workload/sdk/sdk-python/agentrt; do
-            [ -d "$p" ] && cp -r "$p" "${{ env.STAGE_DIR }}/lib/" || true
-          done
+          # .github/scripts/build-tui.sh；B1 fail-hard——macOS 为门禁产品腿）
+          AIRY_TUI_FAIL_HARD=1 bash .github/scripts/build-tui.sh agent-workload/sdk/tui "${{ env.STAGE_DIR }}/bin"
+          # Python 运行时依赖（完全体包 lib/，B1 fail-closed）
+          bash .github/scripts/copy-python-runtime.sh "${{ env.STAGE_DIR }}" \
+            || { echo "::error::python 运行时四子树拷贝失败（lib/ 完整性必需）"; exit 1; }
 
       # G4/U6（0.1.13）：macOS dylib 自包含（同 arm-64 腿，SSoT 见
       # _tools/scripts/ci/release/bundle-macos-dylibs.sh）
@@ -529,12 +517,12 @@ jobs:
             # 收敛到 lib-builddeps.sh（与本地 build.sh / build-linux-x86-64 同源，
             # 幂等 + 离线 deps 缓存优先）。统一 libssl.so.3 链路。
             bash /src/_tools/scripts/ci/release/lib-builddeps.sh
-            # Rust 工具链仅供 agentrt-tui 构建；TUI 不在发布必检
-            # REQUIRED_BIN 之列。qemu 模拟下 rustup-init 偶发网络/执行
-            # 失败（run #14 arm64 rc=127），此处重试 3 次后仍失败则告警
-            # 降级，不阻塞 C/C++ 六架构门禁。
+            # Rust 工具链仅供 agentrt-tui 构建。riscv64 为 canary 载体
+            #（B10 2026-09-07 用户裁决：RISC-V 0.1.13 不发制品），TUI 降级
+            # 可接受；qemu 模拟下 rustup-init 偶发失败（run #14 rc=127）
+            # 重试 3 次后仍失败则告警降级，不阻塞其余六平台门禁。
             if ! (curl --proto '=https' --tlsv1.2 -sSf --retry 3 https://sh.rustup.rs | sh -s -- -y --profile minimal); then
-              echo "warn: rustup 安装失败，agentrt-tui 将缺失（非必检组件，降级继续）"
+              echo "warn: rustup 安装失败，agentrt-tui 将缺失（riscv64 canary 降级继续）"
             fi
             export PATH="$HOME/.cargo/bin:$PATH"
             export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
@@ -560,14 +548,9 @@ jobs:
             else
               cp -f /tmp/tui-target/release/agentrt-tui "$STAGE_DIR/bin/" 2>/dev/null || true
             fi
-            # Python 运行时依赖
-            mkdir -p "$STAGE_DIR/lib"
-            for p in agent-workload/ecosystem/agents/airymax_agents \
-                     agent-workload/ecosystem/agents/airymax_agents_rs \
-                     agent-workload/ecosystem/agents/orchestration \
-                     agent-workload/sdk/sdk-python/agentrt; do
-              [ -d "$p" ] && cp -r "$p" "$STAGE_DIR/lib/" || true
-            done
+            # Python 运行时依赖（完全体包 lib/，B1 fail-closed）
+            bash /src/.github/scripts/copy-python-runtime.sh "$STAGE_DIR" \
+              || { echo "::error::python 运行时四子树拷贝失败（lib/ 完整性必需）"; exit 1; }
             # 完全体 finalize：容器内收集运行时 .so + fail-closed 校验（host
             # 无 /usr/local 自编译库，收集必 not found；.collected 不入包）
             bash /src/.github/scripts/finalize-linux-libs.sh "$STAGE_DIR" /src/_tools
@@ -623,12 +606,11 @@ jobs:
           envs: -e BUILD_DIR=/tmp/airy-build -e STAGE_DIR=stage
           script: |
             export DEBIAN_FRONTEND=noninteractive
-            # Rust 工具链仅供 agentrt-tui 构建；TUI 不在发布必检
-            # REQUIRED_BIN 之列。qemu 模拟下 rustup-init 偶发网络/执行
-            # 失败（run #14 arm64 rc=127），此处重试 3 次后仍失败则告警
-            # 降级，不阻塞 C/C++ 六架构门禁。
+            # Rust 工具链仅供 agentrt-tui 构建（arm-64 门禁产品腿，TUI 属
+            # REQUIRED_SUBTREE，0.1.13 #11 起发布必检）；rustup 安装失败时
+            # 下方 cargo 步骤将 fail-closed，不降级。
             if ! (curl --proto '=https' --tlsv1.2 -sSf --retry 3 https://sh.rustup.rs | sh -s -- -y --profile minimal); then
-              echo "warn: rustup 安装失败，agentrt-tui 将缺失（非必检组件，降级继续）"
+              echo "warn: rustup 安装失败（后续 cargo 步骤将 fail-closed）"
             fi
             export PATH="$HOME/.cargo/bin:$PATH"
             export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
@@ -638,21 +620,18 @@ jobs:
               -DCMAKE_INSTALL_PREFIX="$PWD/$STAGE_DIR"
             cmake --build "$BUILD_DIR" -j"$(nproc)"
             cmake --install "$BUILD_DIR"
-            # Rust TUI（agentrt-tui），失败降级不阻断
+            # Rust TUI（agentrt-tui）：B1 fail-closed——构建失败/缺件即腿失败
             # build.rs 需 airy_run_stream.h（v0.1.10 回归：伞仓相对路径失效）
             export AGENTRT_TUI_RUN_STREAM_H="$PWD/commons/include/airy_run_stream.h"
             export PATH="$HOME/.cargo/bin:$PATH"
             export CARGO_TARGET_DIR=/tmp/tui-target
-            (cd agent-workload/sdk/tui && cargo build --release) || echo "warn: arm64 TUI 构建失败（降级）"
-            cp -f /tmp/tui-target/release/agentrt-tui "$STAGE_DIR/bin/" 2>/dev/null || true
-            # Python 运行时依赖
-            mkdir -p "$STAGE_DIR/lib"
-            for p in agent-workload/ecosystem/agents/airymax_agents \
-                     agent-workload/ecosystem/agents/airymax_agents_rs \
-                     agent-workload/ecosystem/agents/orchestration \
-                     agent-workload/sdk/sdk-python/agentrt; do
-              [ -d "$p" ] && cp -r "$p" "$STAGE_DIR/lib/" || true
-            done
+            (cd agent-workload/sdk/tui && cargo build --release) \
+              || { echo "::error::[arm-64] TUI 构建失败（bin/agentrt-tui 发布完整性必需）"; exit 1; }
+            cp -f /tmp/tui-target/release/agentrt-tui "$STAGE_DIR/bin/" \
+              || { echo "::error::[arm-64] TUI 产物缺失"; exit 1; }
+            # Python 运行时依赖（完全体包 lib/，B1 fail-closed）
+            bash /src/.github/scripts/copy-python-runtime.sh "$STAGE_DIR" \
+              || { echo "::error::python 运行时四子树拷贝失败（lib/ 完整性必需）"; exit 1; }
             # 完全体 finalize：容器内收集运行时 .so + fail-closed 校验（host
             # 无 /usr/local 自编译库，收集必 not found；.collected 不入包）
             bash /src/.github/scripts/finalize-linux-libs.sh "$STAGE_DIR" /src/_tools
@@ -740,10 +719,12 @@ jobs:
             # build.rs 需 airy_run_stream.h（v0.1.10 回归：伞仓相对路径失效）
             export AGENTRT_TUI_RUN_STREAM_H=/src/commons/include/airy_run_stream.h
             export CARGO_TARGET_DIR=/tmp/tui-target
+            # x86-32 门禁产品腿，TUI 属 REQUIRED_SUBTREE：B1 fail-closed
             (cd /src/agent-workload/sdk/tui && cargo build --release --target i686-unknown-linux-gnu) \
-              || echo "warn: x86-32 TUI 交叉构建失败（非必检组件，降级继续）"
+              || { echo "::error::[x86-32] TUI 交叉构建失败（bin/agentrt-tui 发布完整性必需）"; exit 1; }
             mkdir -p /src/stage/bin
-            cp -f /tmp/tui-target/i686-unknown-linux-gnu/release/agentrt-tui /src/stage/bin/ 2>/dev/null || true
+            cp -f /tmp/tui-target/i686-unknown-linux-gnu/release/agentrt-tui /src/stage/bin/ \
+              || { echo "::error::[x86-32] TUI 产物缺失"; exit 1; }
 
       - name: Build in x86-32 container
         uses: ./.github/actions/lf-build-container
@@ -774,13 +755,9 @@ jobs:
               -DCMAKE_INSTALL_PREFIX="$PWD/$STAGE_DIR"
             cmake --build "$BUILD_DIR" -j"${AIRY_JOBS:-$(nproc)}"
             cmake --install "$BUILD_DIR"
-            mkdir -p "$STAGE_DIR/lib"
-            for p in agent-workload/ecosystem/agents/airymax_agents \
-                     agent-workload/ecosystem/agents/airymax_agents_rs \
-                     agent-workload/ecosystem/agents/orchestration \
-                     agent-workload/sdk/sdk-python/agentrt; do
-              [ -d "$p" ] && cp -r "$p" "$STAGE_DIR/lib/" || true
-            done
+            # Python 运行时依赖（完全体包 lib/，B1 fail-closed）
+            bash /src/.github/scripts/copy-python-runtime.sh "$STAGE_DIR" \
+              || { echo "::error::python 运行时四子树拷贝失败（lib/ 完整性必需）"; exit 1; }
             # 完全体 finalize：容器内收集运行时 .so + fail-closed 校验（host
             # 无 /usr/local 自编译库，收集必 not found；.collected 不入包）
             bash /src/.github/scripts/finalize-linux-libs.sh "$STAGE_DIR" /src/_tools
@@ -862,10 +839,13 @@ jobs:
             # build.rs 需 airy_run_stream.h（v0.1.10 回归：伞仓相对路径失效）
             export AGENTRT_TUI_RUN_STREAM_H=/src/commons/include/airy_run_stream.h
             export CARGO_TARGET_DIR=/tmp/tui-target-arm32
+            # arm-32 门禁产品腿，TUI 属 REQUIRED_SUBTREE：B1 fail-closed
+            #（U11 教训：arm-32 TUI 曾静默缺失，仅发布预检兜底）
             (cd /src/agent-workload/sdk/tui && cargo build --release --target armv7-unknown-linux-gnueabihf) \
-              || echo "warn: armv7 TUI 交叉构建失败（非必检组件，降级继续）"
+              || { echo "::error::[arm-32] TUI 交叉构建失败（bin/agentrt-tui 发布完整性必需）"; exit 1; }
             mkdir -p /src/stage/bin
-            cp -f /tmp/tui-target-arm32/armv7-unknown-linux-gnueabihf/release/agentrt-tui /src/stage/bin/ 2>/dev/null || true
+            cp -f /tmp/tui-target-arm32/armv7-unknown-linux-gnueabihf/release/agentrt-tui /src/stage/bin/ \
+              || { echo "::error::[arm-32] TUI 产物缺失"; exit 1; }
 
       - name: Build in arm-32 container
         uses: ./.github/actions/lf-build-container
@@ -889,13 +869,9 @@ jobs:
               -DCMAKE_INSTALL_PREFIX="$PWD/$STAGE_DIR"
             cmake --build "$BUILD_DIR" -j"${AIRY_JOBS:-$(nproc)}"
             cmake --install "$BUILD_DIR"
-            mkdir -p "$STAGE_DIR/lib"
-            for p in agent-workload/ecosystem/agents/airymax_agents \
-                     agent-workload/ecosystem/agents/airymax_agents_rs \
-                     agent-workload/ecosystem/agents/orchestration \
-                     agent-workload/sdk/sdk-python/agentrt; do
-              [ -d "$p" ] && cp -r "$p" "$STAGE_DIR/lib/" || true
-            done
+            # Python 运行时依赖（完全体包 lib/，B1 fail-closed）
+            bash /src/.github/scripts/copy-python-runtime.sh "$STAGE_DIR" \
+              || { echo "::error::python 运行时四子树拷贝失败（lib/ 完整性必需）"; exit 1; }
             # 完全体 finalize：容器内收集运行时 .so + fail-closed 校验（host
             # 无 /usr/local 自编译库，收集必 not found；.collected 不入包）
             bash /src/.github/scripts/finalize-linux-libs.sh "$STAGE_DIR" /src/_tools
@@ -1028,9 +1004,10 @@ jobs:
             echo "::error::dist 缺 sha256 校验件"; exit 1
           }
           # 安装器 SSoT 随附，便于本地发布直接使用（对齐
-          # publish-release.sh 的 AIRY_INSTALLER_SRC 默认值）
-          cp -f scripts/install.sh dist/ 2>/dev/null || true
-          cp -f scripts/install.ps1 dist/ 2>/dev/null || true
+          # publish-release.sh 的 AIRY_INSTALLER_SRC 默认值）。B1 fail-closed：
+          # 安装器为发布交接必需件，缺失即中止（不再静默）
+          cp -f scripts/install.sh dist/ || { echo "::error::缺 scripts/install.sh（安装器 SSoT）"; exit 1; }
+          cp -f scripts/install.ps1 dist/ || { echo "::error::缺 scripts/install.ps1"; exit 1; }
           echo "发布交接包就绪: $(ls dist | wc -l) 个文件"
 
       - name: Upload release-dist (for audit / emergency fallback)
