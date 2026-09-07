@@ -1056,17 +1056,54 @@ jobs:
           test -f "dist/agentrt-${{ env.VERSION }}-linux-x86-64.tar.gz.sha256" || {
             echo "::error::release-dist 缺 linux-x86-64 sha256 校验件"; exit 1; }
 
+      # U9（2026-09-07，0.1.13 清零）：旧版升级路径 e2e——拉取当前 stable
+      #（prev）linux-x86-64 制品 + sha256（取自 stable manifest 的 url/sha256，
+      # 非文件名猜测），传 e2e 脚本第三参执行阶段 U（旧版离线安装 → update
+      # --file 新版 → config 兼容断言 → rollback 回退断言）。prev 与本次发布
+      # 同版本（稳定版同版重发）时跳过——无升级路径语义。
+      - name: Fetch previous stable tarball (U9 upgrade path)
+        run: |
+          set -euo pipefail
+          mf="$(mktemp)"
+          curl -fsSL "https://api.atomgit.com/api/v5/repos/openairymax/agentrt/contents/latest/manifest.stable.json?ref=main" \
+            | python3 -c 'import json,sys,base64;sys.stdout.buffer.write(base64.b64decode(json.load(sys.stdin)["content"]))' > "$mf"
+          python3 - "$mf" /tmp/u9.env <<'PYEOF'
+          import json, sys
+          m = json.load(open(sys.argv[1]))
+          pv = m['latest']
+          art = m['releases'][pv]['artifacts'].get('linux-x86-64')
+          assert art, 'prev stable manifest 无 linux-x86-64 artifact'
+          with open(sys.argv[2], 'w') as f:
+              f.write("PV=%s\nPVURL=%s\nPVSHA=%s\n" % (pv, art['url'], art['sha256']))
+          PYEOF
+          . /tmp/u9.env
+          cur_norm="${VERSION#v}"; pv_norm="${PV#v}"
+          if [ "$cur_norm" = "$pv_norm" ]; then
+            echo "U9 跳过：prev(${PV}) == 本次发布(${VERSION})"
+            echo "PREV_TARBALL=" >> "$GITHUB_ENV"
+          else
+            fn="$(basename "$PVURL")"
+            curl -fsSL -o "dist/$fn" "$PVURL"
+            printf '%s  %s\n' "$PVSHA" "$fn" > "dist/$fn.sha256"
+            (cd dist && sha256sum -c "$fn.sha256")
+            echo "PREV_TARBALL=dist/$fn" >> "$GITHUB_ENV"
+            echo "U9 prev stable: $PV -> dist/$fn"
+          fi
+
       # 镜像不用 digest 钉版：ubuntu:20.04 已 EOS（standard support 2025-05
       # 结束），官方 tag 冻结不再重推，浮动风险趋零；glibc 2.31 基线由 tag
       # 绑定。未来切基线（22.04/24.04）时须与构建腿工具链镜像同步切换并
       # 恢复 digest 钉版。
-      - name: Clean-room e2e (install → daemons → CLI smoke)
+      - name: Clean-room e2e (install → daemons → CLI smoke + U9 upgrade path)
         run: |
           docker pull ubuntu:20.04
+          PREV_ARG=""
+          if [ -n "${PREV_TARBALL:-}" ]; then PREV_ARG="/w/$PREV_TARBALL"; fi
           docker run --rm -v "$PWD:/w:ro" ubuntu:20.04 \
             bash /w/_tools/scripts/ci/release/e2e-clean-room.sh \
               /w/dist/install.sh \
-              "/w/dist/agentrt-${{ env.VERSION }}-linux-x86-64.tar.gz"
+              "/w/dist/agentrt-${{ env.VERSION }}-linux-x86-64.tar.gz" \
+              $PREV_ARG
 
   # 发布全链（0.1.11 D0/D1/D2）：cosign 签名制品 + GPG 签名 manifest +
   # manifest 生成（含 gen1~gen3 平台别名）+ 上传 atomgit release +
