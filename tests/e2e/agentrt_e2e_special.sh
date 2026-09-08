@@ -65,7 +65,7 @@ rpc_match() {
     fi
 }
 
-log "=== agentrt 核心机制专项验证开始（gateway: $GW, ts: $TS）==="
+log "=== agentrt 核心机制专项验证开始（gateway: ${GW}, ts: ${TS}）==="
 
 # ── [S1] 蓝图调度：DAG 全生命周期 ─────────────────────────────────────────
 log "[S1] 蓝图调度（sched.dag_submit / dag_status / dag_cancel）"

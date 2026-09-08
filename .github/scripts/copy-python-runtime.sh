@@ -22,7 +22,7 @@ for p in \
     agent-workload/ecosystem/agents/orchestration \
     agent-workload/sdk/sdk-python/agentrt; do
     if [ ! -d "$p" ]; then
-        echo "::error::python 运行时子树缺失: $p（lib/ 四子树为发布完整性必需）" >&2
+        echo "::error::python 运行时子树缺失: ${p}（lib/ 四子树为发布完整性必需）" >&2
         exit 1
     fi
     cp -r "$p" "$STAGE_DIR/lib/" || {

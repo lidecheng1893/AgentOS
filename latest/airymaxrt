@@ -175,9 +175,9 @@ path_self_heal() {
         _line="export PATH=\"${_bind}:\$PATH\""
     fi
     if printf '\n# >>> AgentRT PATH bootstrap <<<\n%s\n# <<< AgentRT PATH bootstrap <<<\n' "$_line" >> "$_rc" 2>/dev/null; then
-        log warn "PATH 自愈: 已自动将 ${_bind} 追加到 $_rc（新开终端生效，或 source \"$_rc\"）"
+        log warn "PATH 自愈: 已自动将 ${_bind} 追加到 ${_rc}（新开终端生效，或 source \"$_rc\"）"
     else
-        log warn "PATH 自愈: 无法写入 $_rc——手动执行: echo '${_line}' >> \"$_rc\" && source \"$_rc\""
+        log warn "PATH 自愈: 无法写入 ${_rc}——手动执行: echo '${_line}' >> \"$_rc\" && source \"$_rc\""
     fi
 }
 
@@ -459,7 +459,7 @@ find_tool() {
         log debug "PATH 中找到 $cmd_name: $from_path"
         echo "$from_path"
     else
-        log warn "未找到 $cmd_name（PATH 与候选路径均无）"
+        log warn "未找到 ${cmd_name}（PATH 与候选路径均无）"
     fi
 }
 
@@ -500,14 +500,14 @@ log debug "组件定位结果: THINK_BIN=${THINK_BIN:-（缺失）}"
 # gateway 无 /health HTTP 端点，就绪检测使用 JSON-RPC ping（HTTP POST）。
 wait_for_health() { # <url> <秒数>
     local url="$1" tries="$2" i
-    log debug "健康检查开始: $url（最多 ${tries}s）"
+    log debug "健康检查开始: ${url}（最多 ${tries}s）"
     for ((i = 0; i < tries; i++)); do
         if syscurl -fsS -m 1 -X POST -H 'Content-Type: application/json' \
             -d '{"jsonrpc":"2.0","method":"ping","id":1}' "$url" >/dev/null 2>&1; then
-            log debug "健康检查通过: $url（第 $((i + 1)) 次尝试）"
+            log debug "健康检查通过: ${url}（第 $((i + 1)) 次尝试）"
             return 0
         fi
-        log debug "健康检查未就绪: $url（第 $((i + 1)) 次尝试）"
+        log debug "健康检查未就绪: ${url}（第 $((i + 1)) 次尝试）"
         sleep 1
     done
     log debug "健康检查超时: $url"
@@ -551,7 +551,7 @@ _ensure_daemon() {
     [ -x "$bin" ] || return 0
     bname="${bin##*/}"
     if _sock_alive "$sock"; then
-        log debug "补齐跳过: $bname 已在运行（$sock）"
+        log debug "补齐跳过: $bname 已在运行（${sock}）"
         return 0
     fi
     if [ -S "$sock" ]; then
@@ -559,7 +559,7 @@ _ensure_daemon() {
         rm -f "$sock"
     fi
     nohup "$bin" >"$AIRY_HOME/logs/${bname}.out" 2>&1 &
-    log info "补齐 daemon: $bname（PID=$!），日志: $AIRY_HOME/logs/${bname}.out"
+    log info "补齐 daemon: ${bname}（PID=$!），日志: $AIRY_HOME/logs/${bname}.out"
 }
 
 # full 画像的 9 个能力 daemon（minimal 裁剪项）：硬件增强后自动恢复。
@@ -584,7 +584,7 @@ write_profile_state() { # <full|minimal|auto>
     mkdir -p "$AIRY_HOME/config"
     printf 'AIRY_PROFILE=%s\n' "$1" >"$PROFILE_ENV"
     chmod 600 "$PROFILE_ENV" 2>/dev/null || true
-    log info "运行画像已持久化: $PROFILE_ENV（AIRY_PROFILE=$1）"
+    log info "运行画像已持久化: ${PROFILE_ENV}（AIRY_PROFILE=$1）"
 }
 
 # 更新画像中单个变量（外设变化时仅刷新对应行，保留其余固化信息）：
@@ -1108,7 +1108,7 @@ airymaxrt_update() { # update [--check] [--yes] [--channel stable|beta|rc] [--ro
         cur_sha="$(sed -n 's/^AIRY_ARTIFACT_SHA256=//p' "$inst_env" | head -1)"
     fi
     CHANNEL="${CHANNEL:-${cur_ch:-stable}}"
-    case "$CHANNEL" in stable|beta|rc) ;; *) log error "通道无效: $CHANNEL（stable|beta|rc）"; return 2 ;; esac
+    case "$CHANNEL" in stable|beta|rc) ;; *) log error "通道无效: ${CHANNEL}（stable|beta|rc）"; return 2 ;; esac
 
     # 回滚（2026-09-07：备份按目录 mtime 排序 ls -1dt 选最新——旧实现按
     # 目录名 sort -r（v<版本>-<时间戳>）跨版本号边界会选错版本，如 v0.1.9-*
@@ -1329,7 +1329,7 @@ case "$CMD" in
                 _CPU="${_MEM_REST#*|}"
                 _CPU="${_CPU%%|*}"
                 _ACCEL="${_HW_REST##*|}"
-                log info "当前画像: ${AIRYRT_PROFILE:-auto}（硬件建议: $_HW_P）"
+                log info "当前画像: ${AIRYRT_PROFILE:-auto}（硬件建议: ${_HW_P}）"
                 log info "硬件快照: $(detect_arch) · 内存 ${_MEM_TOTAL}KiB/可用 ${_MEM_AVAIL}KiB · CPU ${_CPU} 核 · 加速器 ${_ACCEL}"
                 exit 0
                 ;;
@@ -1347,7 +1347,7 @@ case "$CMD" in
                     log info "full 画像：补齐能力 daemon…"
                     ensure_aux_daemons
                 fi
-                log info "画像已生效: $AIRYRT_PROFILE（下次启动持久生效）"
+                log info "画像已生效: ${AIRYRT_PROFILE}（下次启动持久生效）"
                 exit 0
                 ;;
             *)
@@ -1392,7 +1392,7 @@ case "$CMD" in
                     _MON_PID="$(cat "$_MON_PID_FILE" 2>/dev/null)"
                     if [ -n "$_MON_PID" ] && kill -0 "$_MON_PID" 2>/dev/null; then
                         kill "$_MON_PID" 2>/dev/null
-                        log info "硬件监控已停止（PID=$_MON_PID）"
+                        log info "硬件监控已停止（PID=${_MON_PID}）"
                     else
                         log warn "硬件监控未在运行（陈旧 PID 文件）"
                     fi
@@ -1430,19 +1430,19 @@ case "$CMD" in
                 if [ "$_CUR" = "full" ]; then
                     if [ "$AIRYRT_PROFILE_RAW" != "auto" ]; then
                         if [ "$_HINTED" != "$_CUR" ]; then
-                            log warn "检测到硬件能力增强（$_SNAP），但画像为显式设置 ${AIRYRT_PROFILE}"
+                            log warn "检测到硬件能力增强（${_SNAP}），但画像为显式设置 ${AIRYRT_PROFILE}"
                             log warn "执行 'airymaxrt profile full' 可立即恢复全量功能"
                             _HINTED="$_CUR"
                         fi
                     else
-                        log info "检测到硬件能力增强（$_SNAP），自动恢复全量功能"
+                        log info "检测到硬件能力增强（${_SNAP}），自动恢复全量功能"
                         write_profile_state full
                         AIRYRT_PROFILE=full
                         ensure_aux_daemons
                         _HINTED=""
                     fi
                 elif [ "$_HINTED" != "$_CUR" ]; then
-                    log warn "检测到资源下降（$_SNAP，建议 minimal），当前画像 ${AIRYRT_PROFILE}"
+                    log warn "检测到资源下降（${_SNAP}，建议 minimal），当前画像 ${AIRYRT_PROFILE}"
                     log warn "可执行 'airymaxrt profile minimal' 主动裁剪，或重启进入 minimal"
                     _HINTED="$_CUR"
                 fi
@@ -1479,7 +1479,7 @@ case "$CMD" in
             fi
         fi
         if wait_for_health "$GATEWAY_URL" 1; then
-            log info "gateway: 在线（$GATEWAY_URL）"
+            log info "gateway: 在线（${GATEWAY_URL}）"
         else
             log warn "gateway: 离线"
         fi
@@ -1580,7 +1580,7 @@ case "$CMD" in
                 elif [ -f "$AIRY_HOME/logs/${_arg}.log" ]; then
                     _file="$AIRY_HOME/logs/${_arg}.log"
                 else
-                    log error "未找到日志: $_arg（可用: $(ls "$AIRY_HOME/logs" 2>/dev/null | tr '\n' ' ')）"
+                    log error "未找到日志: ${_arg}（可用: $(ls "$AIRY_HOME/logs" 2>/dev/null | tr '\n' ' ')）"
                     exit 1
                 fi
                 _n="${3:-50}"
@@ -1596,7 +1596,7 @@ case "$CMD" in
             log error "日志文件不存在: $_file"
             exit 1
         fi
-        echo "── $_file（末 ${_n} 行）────────────────────────────" >&2
+        echo "── ${_file}（末 ${_n} 行）────────────────────────────" >&2
         tail -n "$_n" "$_file"
         exit 0
         ;;
@@ -1652,7 +1652,7 @@ case "$CMD" in
             case "$_cmd" in "$CMD"*) _near="$_near $_cmd" ;; esac
         done
         if [ -z "$_exact" ] && [ -n "$_near" ]; then
-            log error "未知命令: $CMD（是否想用:${_near}？）"
+            log error "未知命令: ${CMD}（是否想用:${_near}？）"
             log error "运行 airymaxrt help 查看全部命令"
             exit 2
         fi
@@ -1770,7 +1770,7 @@ launch_frontend() {
         # CLI 交互模式，保证会话不中断（2.2.2 CLI/TUI 随时转换）。正常
         # 退出（用户 Q，code=0）则按用户意愿结束。
         if [ "$rc" -ne 0 ] && [ -n "$CLI_BIN" ] && [ -t 0 ] && [ -t 1 ]; then
-            log warn "TUI 异常退出（code=$rc），自动续接 CLI 交互模式"
+            log warn "TUI 异常退出（code=${rc}），自动续接 CLI 交互模式"
             clear_front_screen
             log info "进入交互界面（airy_cli，/quit 退出）"
             "$CLI_BIN" <&0 &
@@ -1809,9 +1809,9 @@ GATEWAY_DOWN=0
 GATEWAY_ALIVE=0
 if wait_for_health "$GATEWAY_URL" 1; then
     GATEWAY_ALIVE=1
-    log info "gateway 在线（$GATEWAY_URL），本次复用（不重复拉起）"
+    log info "gateway 在线（${GATEWAY_URL}），本次复用（不重复拉起）"
 else
-    log info "gateway 离线（$GATEWAY_URL），将一并拉起"
+    log info "gateway 离线（${GATEWAY_URL}），将一并拉起"
 fi
 log info "确保守护进程群就绪…"
 boot_line "正在启动守护进程群…"
@@ -1959,7 +1959,7 @@ else
         # tool.sock/llm.sock，新实例 unlink 旧 socket 造成死链）。
         if _sock_alive "$sock"; then
             REUSED_COUNT=$((REUSED_COUNT + 1))
-            log info "$bname 已在运行（复用 $sock）"
+            log info "$bname 已在运行（复用 ${sock}）"
             return 0
         fi
         # socket 存在但无监听（崩溃残留/上次会话未清理）→ 先移除，否则
@@ -1995,7 +1995,7 @@ else
                 log debug "llm_d 使用模型配置: $MODEL_CONFIG"
                 nohup "$LLM_BIN" --manager "$MODEL_CONFIG" >"$AIRY_HOME/logs/llm_d.out" 2>&1 &
             else
-                log warn "模型配置不存在（$MODEL_CONFIG），llm_d 使用默认配置"
+                log warn "模型配置不存在（${MODEL_CONFIG}），llm_d 使用默认配置"
                 nohup "$LLM_BIN" >"$AIRY_HOME/logs/llm_d.out" 2>&1 &
             fi
             ALL_DAEMON_PIDS+=("$!")
@@ -2054,7 +2054,7 @@ else
     GW_START="yes"   # 默认启动；gateway 已在线或探测到在线实例时置 no 复用
     if [ "$GATEWAY_ALIVE" = "1" ]; then
         GW_START="no"
-        log info "gateway 已在线（$GATEWAY_URL），复用（生命周期不受本次会话管理）"
+        log info "gateway 已在线（${GATEWAY_URL}），复用（生命周期不受本次会话管理）"
     else
         for _p in "$GATEWAY_PORT" 8083 8084 8085 8086 8087 8088 8089 8090; do
             if _gw_port_available "$_p"; then
@@ -2082,9 +2082,9 @@ else
         log debug "执行: nohup \"$GATEWAY_BIN\" -h 127.0.0.1 -p \"$GATEWAY_PORT\" > \"$AIRY_HOME/logs/gateway_d.out\" 2>&1 &"
         nohup "$GATEWAY_BIN" -h 127.0.0.1 -p "$GATEWAY_PORT" >"$AIRY_HOME/logs/gateway_d.out" 2>&1 &
         GATEWAY_PID=$!
-        log info "gateway_d 已拉起（PID=$GATEWAY_PID），日志: $AIRY_HOME/logs/gateway_d.out"
+        log info "gateway_d 已拉起（PID=${GATEWAY_PID}），日志: $AIRY_HOME/logs/gateway_d.out"
     else
-        log info "gateway 复用在线实例（$GATEWAY_URL），本次会话不接管其生命周期"
+        log info "gateway 复用在线实例（${GATEWAY_URL}），本次会话不接管其生命周期"
     fi
     # 0.1.6h 修复：把实际 gateway 端口固化到运行时文件 run/gateway.port。
     # 根因：端口被占漂移到 8083+ 后，轻量启动器/TUI 仍硬编码 8080，
@@ -2103,7 +2103,7 @@ else
             for spec in "${WAIT_SOCKS[@]}"; do
                 name="${spec%%|*}"; sock="${spec#*|}"
                 if _sock_alive "$sock"; then
-                    log info "$name 就绪（$sock）"
+                    log info "$name 就绪（${sock}）"
                 else
                     remaining+=("$spec")
                     all_done=0
@@ -2139,11 +2139,11 @@ else
     fi
 
     if wait_for_health "$GATEWAY_URL" 15; then
-        log info "gateway 就绪（$GATEWAY_URL）"
-        boot_line "gateway 就绪（$GATEWAY_URL）"
+        log info "gateway 就绪（${GATEWAY_URL}）"
+        boot_line "gateway 就绪（${GATEWAY_URL}）"
     else
-        log warn "gateway 未能就绪（$GATEWAY_URL），查看日志: $AIRY_HOME/logs/gateway_d.out"
-        boot_line "gateway 未就绪（$GATEWAY_URL），降级模式…"
+        log warn "gateway 未能就绪（${GATEWAY_URL}），查看日志: $AIRY_HOME/logs/gateway_d.out"
+        boot_line "gateway 未就绪（${GATEWAY_URL}），降级模式…"
         if [ -n "$CLI_BIN" ]; then
             # CLI 直连 daemon 群（Unix socket），不依赖 gateway HTTP：
             # gateway 起不来时降级到 CLI，而不是整站退出（用户痛点：多数
@@ -2162,5 +2162,5 @@ fi
 # 智能双模由 launch_frontend 统一处理（有 TTY → Rust TUI；非 TTY → airy_cli 流式）。
 launch_frontend
 rc=$?
-log info "交互界面退出（exit=$rc）"
+log info "交互界面退出（exit=${rc}）"
 exit $rc

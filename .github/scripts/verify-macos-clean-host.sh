@@ -27,7 +27,18 @@
 # 用法：verify-macos-clean-host.sh <install.sh> <tarball> [airymaxrt-full]
 #   第三参存在时预置到 $AH/bin/airymaxrt-full（离线自举，同 U9 语义）。
 # 退出码：0=全链通过；非 0=阶段失败。
-set -euo pipefail
+set -Eeuo pipefail
+
+# ERR 面包屑（rc4-5 arm 腿实证：静默死零自定义 annotation → 死点不可见）。
+# set -E 让 trap 进入函数；_EXPECTED 由 fail()/有意 exit 置 1 抑制噪音。
+_EXPECTED=""
+_on_err() {
+    local _rc=$?
+    [ -n "$_EXPECTED" ] && return 0
+    printf '::error::verify died at line %s rc=%s cmd: %s\n' \
+        "$LINENO" "$_rc" "$BASH_COMMAND" >&2
+}
+trap _on_err ERR
 
 INSTALLER="${1:?usage: verify-macos-clean-host.sh <install.sh> <tarball> [airymaxrt-full]}"
 TARBALL="${2:?usage: verify-macos-clean-host.sh <install.sh> <tarball> [airymaxrt-full]}"
@@ -169,7 +180,7 @@ if [ "$_GW_OK" != "1" ]; then
     # 分段通道（job log 需 admin，annotation 匿名可读；逐行 ::error:: 受
     # 10 条上限截断，rc4-3 实证——故走 dump_file 多行 message）。
     if kill -0 "$L_PID" 2>/dev/null; then
-        L_STATE="仍存活（PID $L_PID）——非 set -e 退出"
+        L_STATE="仍存活（PID ${L_PID}）——非 set -e 退出"
     else
         # wait 非 0 rc 不得触发 set -e（rc4-4 arm 实证：取证分支自身
         # 被 set -e 杀死，EV 未生成、dump 未输出，仅剩 runner 默认标注）
@@ -195,6 +206,7 @@ if [ "$_GW_OK" != "1" ]; then
         ps aux 2>/dev/null | grep -E '[_]d( |$)|airymax|airy' | head -20
     } >"$EV" 2>&1 || true
     dump_file "G4b phase4 取证" "$EV"
+    _EXPECTED=1
     exit 1
 fi
 info "gateway online（127.0.0.1:$GWP）"
@@ -239,7 +251,7 @@ SUMMARY="$(printf '%s\n' "$OUT" | grep -E '^online [0-9]+/[0-9]+$' | tail -1)"
 N="${SUMMARY#online }"; N="${N%%/*}"
 M="${SUMMARY#*/}"
 if [ "$N" != "$M" ] || [ "$M" -le 0 ]; then
-    smoke_fail "冒烟断言失败: 汇总 $SUMMARY（要求 N==M 且 M>0）"
+    smoke_fail "冒烟断言失败: 汇总 ${SUMMARY}（要求 N==M 且 M>0）"
 fi
 info "CLI 冒烟通过: $SUMMARY"
 

@@ -83,7 +83,7 @@ rpc_err() {
     fi
 }
 
-log "=== agentrt E2E 回归开始（gateway: $GW, 时间戳: $TS）==="
+log "=== agentrt E2E 回归开始（gateway: ${GW}, 时间戳: ${TS}）==="
 
 # ── gateway ────────────────────────────────────────────────────────────────
 log "[gateway_d]"

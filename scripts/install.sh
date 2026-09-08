@@ -267,22 +267,20 @@ installer_self_bootstrap() {
     [ -f "$0" ] || return 0
     command -v python3 >/dev/null 2>&1 || return 0
     command -v curl >/dev/null 2>&1 || return 0
-    local local_sha
-    local_sha="$(sha256_file "$0")"
-    [ -n "$local_sha" ] || return 0
     local api="https://api.atomgit.com/api/v5/repos/openairymax/agentrt/contents/scripts/install.sh?ref=main"
-    local tmp remote_content remote_sha
+    local tmp remote_content tmp_inst
     tmp="$(syscurl -fsSL --max-time 30 "$api" 2>/dev/null)" || return 0
     remote_content="$(printf '%s' "$tmp" | python3 -c 'import sys,json,base64;d=json.load(sys.stdin);sys.stdout.write(base64.b64decode(d.get("content","")).decode())' 2>/dev/null)" || return 0
     [ -n "$remote_content" ] || return 0
-    remote_sha="$(printf '%s' "$remote_content" | sha256_stdin)"
-    [ -n "$remote_sha" ] || return 0
-    [ "$remote_sha" = "$local_sha" ] && return 0
+    # 字符串相等比较（两侧都经命令替换、剥尾换行对称）。禁止改用
+    # "解码串算 sha vs 磁盘文件算 sha"：命令替换剥掉尾部换行使两侧
+    # 永不相等 → 每次磁盘执行都误切远程重执行（rc4-5 实证：核验对象
+    # 漂移到 main 版安装器），且 printf '%s' 落盘会丢文件尾换行。
+    [ "$remote_content" = "$(cat "$0")" ] && return 0
     log_info "检测到安装器新版本，切换到远程最新版执行…"
     export AIRY_INSTALLER_BOOTSTRAPPED=1
-    local tmp_inst
     tmp_inst="$(mktemp 2>/dev/null || echo "${TMPDIR:-/tmp}/airymaxrt-installer.$$")"
-    printf '%s' "$remote_content" > "$tmp_inst" || { rm -f "$tmp_inst"; return 0; }
+    printf '%s\n' "$remote_content" > "$tmp_inst" || { rm -f "$tmp_inst"; return 0; }
     chmod 755 "$tmp_inst"
     exec "$tmp_inst" "$@"
 }
@@ -1494,7 +1492,7 @@ if [ "\$_INPATH" != "1" ] && [ -n "\$_BINDIR" ]; then
             _LINE=\$(printf 'export PATH="%s:\$PATH"' "\$_BINDIR")
         fi
         printf '\n# >>> AgentRT PATH bootstrap <<<\n%s\n# <<< AgentRT PATH bootstrap <<<\n' "\$_LINE" >> "\$_RC" 2>/dev/null \
-            && echo "airymaxrt: 已自动将 \${_BINDIR} 追加到 \$_RC（新开终端生效，或 source \"\$_RC\"）" >&2
+            && echo "airymaxrt: 已自动将 \${_BINDIR} 追加到 \${_RC}（新开终端生效，或 source \"\$_RC\"）" >&2
     fi
 fi
 # 管理命令自举：二进制模式轻量启动器仅提供 TUI/CLI 前端入口，完整启动器
