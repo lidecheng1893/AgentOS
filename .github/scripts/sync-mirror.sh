@@ -264,9 +264,31 @@ sync_root() {
   # 'refs/heads/main:refs/heads/main' 推送直接 "src refspec does not
   # match any" 失败。自 atomgit 取 main 后 push 语义不变：GitHub 侧
   # main 与 SSoT 分叉时仍被非 force push 大声拒绝（镜像 = SSoT 一致）。
-  if ! err="$(timeout 300 git -C "$GITHUB_WORKSPACE" fetch -q "$(src_url "$ROOT_REPO")" \
-      '+refs/heads/main:refs/heads/main' 2>&1)"; then
-    echo "::error::agentrt: atomgit main fetch failed: $(printf '%s' "$err" | redact | tr '\n' ' ' | tail -c 300)"
+  #
+  # refspec 必须按 checkout 形态分流（rc4-8 前一轮实证）：branch push
+  # 触发的 checkout 正检着 main，向已检出分支 fetch 被 git 无条件拒绝
+  # （"refusing to fetch into branch 'refs/heads/main' checked out at
+  # ..."），annotation 报警后 main 推送仍照常执行——镜像静默停留在
+  # checkout SHA，SSoT 独有提交永不落地。detached（tag 触发）形态无此
+  # 冲突，维持直写 refs/heads/main。
+  if [ -n "$(git -C "$GITHUB_WORKSPACE" symbolic-ref -q HEAD 2>/dev/null)" ]; then
+    # branch checkout 形态：SSoT main 落到镜像专用 ref，绕开已检出分支；
+    # push 源用该 ref，非 force 的分叉拒绝语义保持不变
+    main_ref='refs/mirror/main'
+    if ! err="$(timeout 300 git -C "$GITHUB_WORKSPACE" fetch -q "$(src_url "$ROOT_REPO")" \
+        '+refs/heads/main:refs/mirror/main' 2>&1)"; then
+      echo "::error::agentrt: atomgit main fetch failed: $(printf '%s' "$err" | redact | tr '\n' ' ' | tail -c 300)"
+      FAILED+=("$ROOT_REPO")
+      return 1
+    fi
+  else
+    main_ref='refs/heads/main'
+    if ! err="$(timeout 300 git -C "$GITHUB_WORKSPACE" fetch -q "$(src_url "$ROOT_REPO")" \
+        '+refs/heads/main:refs/heads/main' 2>&1)"; then
+      echo "::error::agentrt: atomgit main fetch failed: $(printf '%s' "$err" | redact | tr '\n' ' ' | tail -c 300)"
+      FAILED+=("$ROOT_REPO")
+      return 1
+    fi
   fi
   local pair label url
   for pair in \
@@ -275,10 +297,10 @@ sync_root() {
     label="${pair%%|*}"
     url="${pair#*|}"
     git -C "$GITHUB_WORKSPACE" push -q "$url" \
-      'refs/heads/main:refs/heads/main' \
-      || { log "  FAIL: $ROOT_REPO push $label (main)"; rc=1; }
+      "${main_ref}:refs/heads/main" \
+      || { echo "::error::agentrt: push $label (main) failed"; rc=1; }
     git -C "$GITHUB_WORKSPACE" push -q --force --tags "$url" \
-      || { log "  FAIL: $ROOT_REPO push $label (tags)"; rc=1; }
+      || { echo "::error::agentrt: push $label (tags) failed"; rc=1; }
   done
   if [ "$rc" -eq 0 ]; then
     OK+=("$ROOT_REPO")
