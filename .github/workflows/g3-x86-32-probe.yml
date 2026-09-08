@@ -15,7 +15,7 @@
 # 推 tag 即探针，出结论后载体（workflow + tag）整体拆除。
 name: G3 X86-32 Probe
 
-"run-name": "G3 x86-32 probe @ ${GIT_COMMIT_SHORT}"
+run-name: G3 x86-32 probe @ ${{ github.ref_name }}
 
 on:
   workflow_dispatch:
