@@ -12,7 +12,7 @@ name: G4b macOS Clean-Host
 # 指定版本 release 的 macos 平台 tar.gz（product 内容与正式发布一致）。
 #
 # 触发：
-#   - workflow_dispatch（版本由输入指定，默认验证 v0.1.13-rc4 制品）；
+#   - workflow_dispatch（版本由输入指定，默认验证 v0.1.13-rc5 制品）；
 #   - push 到 g4b-* tag（tag 指向含本 workflow 的提交即可，无需 PAT）。
 # 两条腿：arm-64（macos-latest）与 x86-64（macos-15-intel），各自验证
 # 对应架构发布包。判定全在脚本内 fail-closed：job 结论 success 即出证。
@@ -25,9 +25,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: '待核验产品版本（如 v0.1.13-rc4）'
+        description: '待核验产品版本（如 v0.1.13-rc5）'
         required: true
-        default: 'v0.1.13-rc4'
+        default: 'v0.1.13-rc5'
   push:
     tags:
       - 'g4b-*'
@@ -40,7 +40,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  VERSION: ${{ github.event.inputs.version || 'v0.1.13-rc4' }}
+  VERSION: ${{ github.event.inputs.version || 'v0.1.13-rc5' }}
 
 jobs:
   clean-host-arm64:
