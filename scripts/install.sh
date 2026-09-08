@@ -1127,12 +1127,12 @@ path_bootstrap() {
         line="export PATH=\"${BIN_DIR}:\$PATH\""
     fi
     if { printf '\n# >>> AgentRT PATH bootstrap <<<\n%s\n# <<< AgentRT PATH bootstrap <<<\n' "$line" ; } >> "$rc" 2>/dev/null; then
-        log_ok "PATH 引导: 已自动追加 ${BIN_DIR} 到 $rc（新开终端生效，或执行 source \"$rc\"）"
+        log_ok "PATH 引导: 已自动追加 ${BIN_DIR} 到 ${rc}（新开终端生效，或执行 source \"$rc\"）"
         env_set "AIRY_PATH_RC=$rc"
         env_set "AIRY_PATH_APPENDED=yes"
         return 0
     fi
-    log_warn "PATH 引导: 无法写入 $rc（自动追加失败），请手动执行:"
+    log_warn "PATH 引导: 无法写入 ${rc}（自动追加失败），请手动执行:"
     log_warn "  echo '${line}' >> \"$rc\" && source \"$rc\""
     env_set "AIRY_PATH_APPENDED=no"
     return 1

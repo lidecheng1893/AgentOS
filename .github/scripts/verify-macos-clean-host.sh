@@ -59,6 +59,10 @@ info() { echo "  -- $*"; }
 #     （rc4-4 x86 实证）；
 #   - 超出 9 段配额的文件只取尾部——死点总在日志尾部（rc4-4 arm 实证：
 #     取证分支自身 wait 非 0 rc 触发 set -e，证据未生成即死）。
+#   - macOS bash 3.2 在 C locale 下把紧随变量名的多字节字节并入变量名
+#     （`$var（` → unbound variable），set -u 展开错误直死且不过 ERR
+#     trap——"零 annotation 静默死"的机理本体（rc4-6 双腿实证）。规则：
+#     变量名紧随非 ASCII 字符时必须 ${var} 显式定界。
 _ann_seq=0
 _ann_seg=1100
 dump_file() { # dump_file <title> <file>
@@ -86,7 +90,7 @@ dump_file() { # dump_file <title> <file>
         printf '\n'
         _off=$((_off + _ann_seg))
     done
-    [ "$_part" -gt 0 ] || info "（annotation 配额已尽，未 dump: $_title）"
+    [ "$_part" -gt 0 ] || info "（annotation 配额已尽，未 dump: ${_title}）"
 }
 
 [ -f "$INSTALLER" ] || fail "install.sh 不存在: $INSTALLER"
@@ -114,7 +118,7 @@ else
     _irc=$?
     dump_file "install.sh --from-file 失败（rc=${_irc}）stdout+stderr" "$IOUT"
     { echo "宿主: $(uname -srm) | bash $BASH_VERSION"
-      echo "tarball: $TARBALL（$(wc -c <"$TARBALL" 2>/dev/null | tr -d ' ') bytes）"
+      echo "tarball: ${TARBALL}（$(wc -c <"$TARBALL" 2>/dev/null | tr -d ' ') bytes）"
       echo "-- tar 清单（前 120 项）--"
       tar -tzf "$TARBALL" 2>&1 | head -120
     } >"$AH/logs/install.toc" 2>&1 || true
@@ -186,7 +190,7 @@ if [ "$_GW_OK" != "1" ]; then
         # 被 set -e 杀死，EV 未生成、dump 未输出，仅剩 runner 默认标注）
         L_RC=0
         wait "$L_PID" 2>/dev/null || L_RC=$?
-        L_STATE="已退出（PID $L_PID, rc=$L_RC）——set -e 静默终止嫌疑"
+        L_STATE="已退出（PID ${L_PID}, rc=${L_RC}）——set -e 静默终止嫌疑"
     fi
     EV="$AH/logs/g4b-evidence.txt"
     {
@@ -209,7 +213,7 @@ if [ "$_GW_OK" != "1" ]; then
     _EXPECTED=1
     exit 1
 fi
-info "gateway online（127.0.0.1:$GWP）"
+info "gateway online（127.0.0.1:${GWP}）"
 
 # ─── 阶段 5：CLI 冒烟 ─────────────────────────────────────────────────────
 info "CLI 冒烟: airy_cli -p /daemons"
@@ -261,4 +265,4 @@ sleep 3
 kill -KILL "$L_PID" 2>/dev/null || true
 exec 9>&- 2>/dev/null || true
 rm -f "$CTRL"
-echo "[OK] macOS 干净真机核验通过: $SUMMARY | gateway 127.0.0.1:$GWP"
+echo "[OK] macOS 干净真机核验通过: $SUMMARY | gateway 127.0.0.1:${GWP}"

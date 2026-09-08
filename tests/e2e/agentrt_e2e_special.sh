@@ -73,7 +73,7 @@ DAG_ID=""
 R=$(rpc_raw sched.dag_submit "{\"dag\":{\"name\":\"special-${TS}\",\"nodes\":[{\"id\":\"s1a\",\"goal\":\"step a\",\"role\":\"agent\"},{\"id\":\"s1b\",\"goal\":\"step b\",\"role\":\"agent\",\"depends\":[\"s1a\"]},{\"id\":\"s1c\",\"goal\":\"step c\",\"role\":\"agent\",\"depends\":[\"s1a\"]}]}}")
 if echo "$R" | grep -q '"dag_id"'; then
     DAG_ID=$(echo "$R" | sed -n 's/.*"dag_id":"\([^"]*\)".*/\1/p')
-    ok "dag_submit（$DAG_ID）"
+    ok "dag_submit（${DAG_ID}）"
 else
     fail "dag_submit => $(echo "$R" | head -c 200)"
 fi
