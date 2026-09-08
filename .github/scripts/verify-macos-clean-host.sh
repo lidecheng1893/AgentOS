@@ -39,31 +39,43 @@ info() { echo "  -- $*"; }
 
 # GitHub 匿名证据通道：job log 需 admin，check-run annotation 匿名 API
 # 可读；但每 step 上限 10 条，逐行 ::error:: 在长日志下被静默截断
-# （rc4-3 实证仅见 3 条）。dump_file 把文件内容按 ≤3800 字符分段、
-# 换行编码为 %0A，以多行 message 单条 annotation 输出——10 条内可
-# 携带 ~36KB 取证（rc4-4 取证通道改造）。
+# （rc4-3 实证仅见 3 条）。dump_file 把文件内容分段、换行编码为 %0A，
+# 以多行 message 单条 annotation 输出。硬约束：
+#   - annotation message 上限 4000 字符：段原始 1100B × 最坏 3 倍编码
+#     （%25/%0A）+ 标题 < 4K 安全余量；
+#   - 标题 printf 不得带 \n：::error:: command 行以行尾为界，标题提前
+#     换行会把段内容抛到普通 job log（匿名不可读），message 成空壳
+#     （rc4-4 x86 实证）；
+#   - 超出 9 段配额的文件只取尾部——死点总在日志尾部（rc4-4 arm 实证：
+#     取证分支自身 wait 非 0 rc 触发 set -e，证据未生成即死）。
 _ann_seq=0
+_ann_seg=1100
 dump_file() { # dump_file <title> <file>
     _title="$1"; _file="$2"
-    [ "$_ann_seq" -lt 9 ] || { info "（annotation 配额已尽，未 dump: $_title）"; return 0; }
     if [ ! -s "$_file" ]; then
+        [ "$_ann_seq" -lt 9 ] || return 0
         _ann_seq=$((_ann_seq + 1))
         printf '::error::%d) %s: <空>\n' "$_ann_seq" "$_title"
         return 0
     fi
     _sz="$(wc -c <"$_file" 2>/dev/null | tr -d ' ')"
-    _off=0; _part=0
+    _off=0; _part=0; _hdr=""
+    if [ "$_sz" -gt "$((_ann_seg * 9))" ]; then
+        _off=$((_sz - _ann_seg * 9))
+        _hdr="[尾部 $((_ann_seg * 9))B] "
+    fi
     while [ "$_off" -lt "$_sz" ] && [ "$_ann_seq" -lt 9 ]; do
         _ann_seq=$((_ann_seq + 1)); _part=$((_part + 1))
-        printf '::error::%d) %s [段%d] bytes %d-%d / 共%s:\n' \
-            "$_ann_seq" "$_title" "$_part" "$_off" "$((_off + 3800))" "$_sz"
-        tail -c +"$((_off + 1))" "$_file" 2>/dev/null | head -c 3800 \
+        printf '::error::%d) %s %s[段%d] bytes %d-%d / 共%s: ' \
+            "$_ann_seq" "$_title" "$_hdr" "$_part" "$_off" "$((_off + _ann_seg))" "$_sz"
+        tail -c +"$((_off + 1))" "$_file" 2>/dev/null | head -c "$_ann_seg" \
             | LC_ALL=C tr -d '\r' \
             | LC_ALL=C sed 's/%/%25/g' \
             | LC_ALL=C awk '{ ORS=""; print $0 "%0A" }'
         printf '\n'
-        _off=$((_off + 3800))
+        _off=$((_off + _ann_seg))
     done
+    [ "$_part" -gt 0 ] || info "（annotation 配额已尽，未 dump: $_title）"
 }
 
 [ -f "$INSTALLER" ] || fail "install.sh 不存在: $INSTALLER"
@@ -120,6 +132,8 @@ info "拉起 daemon 群（完整启动器默认流程，健康等待含 gateway�
 CTRL="$AH/tmp/g4b-ctrl.$$"
 mkdir -p "$AH/tmp" 2>/dev/null || true
 rm -f "$CTRL"; mkfifo "$CTRL" 2>/dev/null || true
+# FIFO 创建失败时 exec 9<> 会在 set -e 下静默死（无 annotation 出证）
+[ -p "$CTRL" ] || fail "mkfifo 失败: $CTRL"
 # 保持 stdin 写端打开：非 TTY 前端（airy_cli -p）读 stdin，EOF 会让会话退出。
 # 注意必须以读写方式（<>）打开 FIFO：只写（>）会在无读者时阻塞 exec，而
 # 读者（启动器）要等本行返回后才启动——互相等待死锁（G4b 实测修正）。
@@ -157,8 +171,11 @@ if [ "$_GW_OK" != "1" ]; then
     if kill -0 "$L_PID" 2>/dev/null; then
         L_STATE="仍存活（PID $L_PID）——非 set -e 退出"
     else
-        wait "$L_PID" 2>/dev/null
-        L_STATE="已退出（PID $L_PID, rc=$?）——set -e 静默终止嫌疑"
+        # wait 非 0 rc 不得触发 set -e（rc4-4 arm 实证：取证分支自身
+        # 被 set -e 杀死，EV 未生成、dump 未输出，仅剩 runner 默认标注）
+        L_RC=0
+        wait "$L_PID" 2>/dev/null || L_RC=$?
+        L_STATE="已退出（PID $L_PID, rc=$L_RC）——set -e 静默终止嫌疑"
     fi
     EV="$AH/logs/g4b-evidence.txt"
     {
