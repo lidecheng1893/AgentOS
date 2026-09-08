@@ -8,14 +8,20 @@
 # 测试），产出 32 位移植错误数据集（ci-debug issue + ::error::
 # annotation），据以下一步"探针 → leg"决策。
 #
-# 载体纪律（upload-probe / smoke-selftest 同规格，0.1.13）：dispatch
-# 专用、不入任何 needs、出结论即拆除——防幽灵 trigger 与 P19 链副作用。
+# 载体纪律（upload-probe / smoke-selftest 同规格，0.1.13）：专用触发、
+# 不入任何 needs、出结论即拆除——防幽灵 trigger 与 P19 链副作用。
+# 触发通道：workflow_dispatch 需 REST 写凭据；开发机仅有 SSH 推送链
+# （无 API token），故补 tag 触发 `g3-x86-32-*` 作为等价派发通道——
+# 推 tag 即探针，出结论后载体（workflow + tag）整体拆除。
 name: G3 X86-32 Probe
 
 "run-name": "G3 x86-32 probe @ ${GIT_COMMIT_SHORT}"
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'g3-x86-32-*'
 
 concurrency:
   group: ci-windows-runner-bus
