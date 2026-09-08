@@ -1,0 +1,113 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later OR Apache-2.0
+# Copyright (c) 2025-2026 SPHARX Ltd. All Rights Reserved.
+#
+# G3 Windows x86-32 探针（0.1.12 §8 G3 / 0.1.13 B6 承接）
+#
+# 目的：在 x64 主机上以 vcpkg x86-windows triplet + MSVC x86 工具集
+# （-A Win32）构建与 x64 腿同面的全量目标（daemons 15 + airy_cli +
+# 测试），产出 32 位移植错误数据集（ci-debug issue + ::error::
+# annotation），据以下一步"探针 → leg"决策。
+#
+# 载体纪律（upload-probe / smoke-selftest 同规格，0.1.13）：dispatch
+# 专用、不入任何 needs、出结论即拆除——防幽灵 trigger 与 P19 链副作用。
+name: G3 X86-32 Probe
+
+"run-name": "G3 x86-32 probe @ ${GIT_COMMIT_SHORT}"
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-windows-runner-bus
+  cancel-in-progress: false
+
+jobs:
+  probe-windows-x86-32:
+    runs-on: windows-latest
+    # vcpkg x86-windows 全 port 从源码编译（openssl/libwebsockets 等）+
+    # 全量目标构建；护栏 4h（GitHub 上限 6h）。
+    timeout-minutes: 240
+    env:
+      BUILD_DIR: ../build-x86
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+      - name: Init submodules (targeted)
+        uses: ./.github/actions/lf-init-deps
+        with:
+          groups: agent-workload
+          gh_token: ${{ secrets.GH_TOKEN }}
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/vcpkg-cache-x86
+          key: vcpkg-cache-x86-${{ hashFiles('.github/workflows/g3-x86-32-probe.yml') }}
+          restore-keys: |
+            vcpkg-cache-x86-
+
+      - name: Install dependencies (vcpkg x86-windows)
+        shell: pwsh
+        env:
+          VCPKG_BINARY_SOURCES: "clear;files,${{ runner.temp }}/vcpkg-cache-x86,readwrite"
+        run: |
+          # 与 x64 腿同 port 清单（release windows 腿含 nghttp2——HTTP/2
+          # 在 Windows 禁用，x64 build-test 腿即无 nghttp2，探针保持一致）
+          vcpkg install sqlite3 cjson libyaml curl openssl zlib libmicrohttpd libwebsockets libevent --triplet x86-windows
+
+      - name: Configure (MSVC x86 / Win32)
+        shell: pwsh
+        run: |
+          cmake -S . -B ${{ env.BUILD_DIR }} -A Win32 `
+            -DVCPKG_TARGET_TRIPLET=x86-windows `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DBUILD_TESTS=ON -DAIRY_BUILD_ALL=ON -DBUILD_DAEMON=ON -DBUILD_CLI=ON `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=ProgramDatabase
+
+      - name: Build
+        shell: pwsh
+        run: |
+          # 数据集语义同 windows-build 腿（wave-1..11 通道）：错误行 + 前一行
+          # 合并 annotation；全量日志落 ci-debug issue。
+          $buildLog = Join-Path $env:RUNNER_TEMP "build-x86.log"
+          cmake --build "${{ env.BUILD_DIR }}" --config Release --parallel 2>&1 | Tee-Object -FilePath $buildLog
+          if ($LASTEXITCODE -ne 0) {
+            $lines = Get-Content $buildLog
+            $errIdx = 0..($lines.Count - 1) | Where-Object { $lines[$_] -match ': error |error C[0-9]+|fatal error|error LNK[0-9]+' }
+            $errs = foreach ($i in $errIdx) { $lines[[Math]::Max(0, $i - 1)..$i] }
+            $tail = if ($errs) { $errs | Select-Object -Last 40 } else { $lines | Select-Object -Last 60 }
+            $msg = ("MSVC x86 build failed (exit {0})`n{1}" -f $LASTEXITCODE, ($tail -join "`n"))
+            if ($msg.Length -gt 30000) { $msg = $msg.Substring($msg.Length - 30000) }
+            $msg = $msg.Replace('%', '%25').Replace("`r", '').Replace("`n", '%0A')
+            Write-Output "::error::$msg"
+            exit $LASTEXITCODE
+          }
+
+      - name: Dump build log to ci-debug issue
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: bash .github/scripts/ci-debug-dump.sh "g3 x86-32 build" "$RUNNER_TEMP/build-x86.log"
+
+      - name: Run tests (ctest, dataset only)
+        if: success()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $ctestLog = Join-Path $env:RUNNER_TEMP "ctest-x86.log"
+          ctest --test-dir ${{ env.BUILD_DIR }} -C Release --output-on-failure --timeout 240 2>&1 | Tee-Object -FilePath $ctestLog
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Dump ctest log to ci-debug issue
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          [ -f "$RUNNER_TEMP/ctest-x86.log" ] || exit 0
+          bash .github/scripts/ci-debug-dump.sh "g3 x86-32 ctest" "$RUNNER_TEMP/ctest-x86.log"
