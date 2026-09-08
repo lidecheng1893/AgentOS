@@ -37,6 +37,35 @@ AH="$HOME/.airymaxrt"
 fail() { echo "::error::$*" >&2; exit 1; }
 info() { echo "  -- $*"; }
 
+# GitHub 匿名证据通道：job log 需 admin，check-run annotation 匿名 API
+# 可读；但每 step 上限 10 条，逐行 ::error:: 在长日志下被静默截断
+# （rc4-3 实证仅见 3 条）。dump_file 把文件内容按 ≤3800 字符分段、
+# 换行编码为 %0A，以多行 message 单条 annotation 输出——10 条内可
+# 携带 ~36KB 取证（rc4-4 取证通道改造）。
+_ann_seq=0
+dump_file() { # dump_file <title> <file>
+    _title="$1"; _file="$2"
+    [ "$_ann_seq" -lt 9 ] || { info "（annotation 配额已尽，未 dump: $_title）"; return 0; }
+    if [ ! -s "$_file" ]; then
+        _ann_seq=$((_ann_seq + 1))
+        printf '::error::%d) %s: <空>\n' "$_ann_seq" "$_title"
+        return 0
+    fi
+    _sz="$(wc -c <"$_file" 2>/dev/null | tr -d ' ')"
+    _off=0; _part=0
+    while [ "$_off" -lt "$_sz" ] && [ "$_ann_seq" -lt 9 ]; do
+        _ann_seq=$((_ann_seq + 1)); _part=$((_part + 1))
+        printf '::error::%d) %s [段%d] bytes %d-%d / 共%s:\n' \
+            "$_ann_seq" "$_title" "$_part" "$_off" "$((_off + 3800))" "$_sz"
+        tail -c +"$((_off + 1))" "$_file" 2>/dev/null | head -c 3800 \
+            | LC_ALL=C tr -d '\r' \
+            | LC_ALL=C sed 's/%/%25/g' \
+            | LC_ALL=C awk '{ ORS=""; print $0 "%0A" }'
+        printf '\n'
+        _off=$((_off + 3800))
+    done
+}
+
 [ -f "$INSTALLER" ] || fail "install.sh 不存在: $INSTALLER"
 [ -f "$TARBALL" ] || fail "tarball 不存在: $TARBALL"
 [ "$(uname -s 2>/dev/null)" = "Darwin" ] || fail "本脚本须在 macOS 宿主执行（当前 $(uname -srm)）"
@@ -53,7 +82,22 @@ fi
 info "离线安装: $(basename "$TARBALL")"
 # 隔离测试环境：确保无历史残留（托管 runner 每次全新，幂等兜底）
 rm -rf "$AH"
-bash "$INSTALLER" --from-file "$TARBALL" || fail "install.sh --from-file 失败"
+mkdir -p "$AH/logs" 2>/dev/null || true
+# 安装输出全程捕获：失败时经 annotation 通道出证（job log 需 admin）。
+IOUT="$AH/logs/install.out"
+if bash "$INSTALLER" --from-file "$TARBALL" >"$IOUT" 2>&1; then
+    tail -n 3 "$IOUT" | sed 's/^/    /' || true
+else
+    _irc=$?
+    dump_file "install.sh --from-file 失败（rc=${_irc}）stdout+stderr" "$IOUT"
+    { echo "宿主: $(uname -srm) | bash $BASH_VERSION"
+      echo "tarball: $TARBALL（$(wc -c <"$TARBALL" 2>/dev/null | tr -d ' ') bytes）"
+      echo "-- tar 清单（前 120 项）--"
+      tar -tzf "$TARBALL" 2>&1 | head -120
+    } >"$AH/logs/install.toc" 2>&1 || true
+    dump_file "tarball 清单" "$AH/logs/install.toc"
+    fail "install.sh --from-file 失败（rc=${_irc}，证据见 annotation）"
+fi
 for f in "$AH/bin/airy_cli" "$AH/bin/airymaxrt"; do
     [ -e "$f" ] || fail "安装产物缺失: $f"
 done
@@ -107,27 +151,33 @@ while [ "$_i" -lt 120 ]; do
     sleep 1
 done
 if [ "$_GW_OK" != "1" ]; then
-    # 日志/状态转 annotation（GitHub job 日志需 admin，annotation 匿名 API
-    # 可读，是 CI 台账的证据通道）。逐行 ::error 保证多行都可见。
-    echo "::error::gateway TCP 不可达: 127.0.0.1:${GWP}"
-    echo "::error::-- launcher 进程状态 --"
+    # 取证：launcher 存活/退出态（含 wait rc）→ 单一证据文件 → annotation
+    # 分段通道（job log 需 admin，annotation 匿名可读；逐行 ::error:: 受
+    # 10 条上限截断，rc4-3 实证——故走 dump_file 多行 message）。
     if kill -0 "$L_PID" 2>/dev/null; then
-        echo "::error::launcher 仍存活（PID $L_PID）——非 set -e 退出"
+        L_STATE="仍存活（PID $L_PID）——非 set -e 退出"
     else
-        echo "::error::launcher 已退出（PID $L_PID）——疑似 set -e 静默终止"
+        wait "$L_PID" 2>/dev/null
+        L_STATE="已退出（PID $L_PID, rc=$?）——set -e 静默终止嫌疑"
     fi
-    echo "::error::-- launcher 日志尾部（verbose，stdout+stderr 合流）--"
-    tail -n 80 "$LOGF" 2>/dev/null | sed 's/^/::error::/; s/%/%25/g; s/\r//g' | head -80 || true
-    echo "::error::-- airymaxrt.log 尾部（boot 进度真身，含 debug）--"
-    tail -n 120 "$AH/logs/airymaxrt.log" 2>/dev/null | sed 's/^/::error::/; s/%/%25/g; s/\r//g' | head -120 || true
-    echo "::error::-- logs/ 目录 --"
-    ls -1 "$AH/logs" 2>/dev/null | sed 's/^/::error::/' | head -30 || true
-    echo "::error::-- run/ 目录 --"
-    ls -1 "$AH/run" 2>/dev/null | sed 's/^/::error::/' | head -20 || true
-    echo "::error::-- gateway_d.out --"
-    tail -n 20 "$AH/logs/gateway_d.out" 2>/dev/null | sed 's/^/::error::/; s/%/%25/g; s/\r//g' | head -20 || true
-    echo "::error::-- 进程表（daemon 群/launcher 残留）--"
-    ps aux 2>/dev/null | grep -E '[_]d( |$)|airymax|airy' | head -20 | sed 's/^/::error::/; s/%/%25/g; s/\r//g' || true
+    EV="$AH/logs/g4b-evidence.txt"
+    {
+        echo "gateway TCP 不可达: 127.0.0.1:${GWP}（探测 ${_i}s）"
+        echo "launcher $L_STATE"
+        echo "== launcher 日志尾部（AIRYRT_TERM_LOG=verbose，stdout+stderr 合流 LOGF）=="
+        tail -n 120 "$LOGF" 2>/dev/null
+        echo "== airymaxrt.log 尾部（boot 进度真身，含 debug）=="
+        tail -n 150 "$AH/logs/airymaxrt.log" 2>/dev/null
+        echo "== logs/ 目录 =="
+        ls -la "$AH/logs" 2>/dev/null
+        echo "== run/ 目录 =="
+        ls -la "$AH/run" 2>/dev/null
+        echo "== gateway_d.out 尾部 =="
+        tail -n 40 "$AH/logs/gateway_d.out" 2>/dev/null
+        echo "== 进程表（daemon 群/launcher 残留）=="
+        ps aux 2>/dev/null | grep -E '[_]d( |$)|airymax|airy' | head -20
+    } >"$EV" 2>&1 || true
+    dump_file "G4b phase4 取证" "$EV"
     exit 1
 fi
 info "gateway online（127.0.0.1:$GWP）"
@@ -138,9 +188,12 @@ info "CLI 冒烟: airy_cli -p /daemons"
 # macOS 无 timeout(1)：以后台 + 轮询实现 30s 超时（bash3.2 兼容）。
 OUT=""
 _i=0
+CLI_OUT="$AH/logs/g4b-cli.out"
+# 冒烟失败时输出经 annotation 通道出证（job log 需 admin）
+smoke_fail() { dump_file "CLI 冒烟输出" "$CLI_OUT"; fail "$*"; }
 while [ "$_i" -lt 60 ]; do
     _o=""
-    "$AH/bin/airy_cli" -p /daemons >"$AH/tmp/g4b-cli.$$" 2>/dev/null &
+    "$AH/bin/airy_cli" -p /daemons >"$CLI_OUT" 2>/dev/null &
     _cpid=$!
     _t=0
     while [ "$_t" -lt 30 ] && kill -0 "$_cpid" 2>/dev/null; do
@@ -150,26 +203,26 @@ while [ "$_i" -lt 60 ]; do
         kill -KILL "$_cpid" 2>/dev/null || true
     else
         wait "$_cpid" 2>/dev/null || true
-        _o="$(cat "$AH/tmp/g4b-cli.$$" 2>/dev/null || true)"
+        _o="$(cat "$CLI_OUT" 2>/dev/null || true)"
     fi
-    rm -f "$AH/tmp/g4b-cli.$$" 2>/dev/null || true
     if [ -n "$_o" ] && printf '%s' "$_o" | grep -q '^online '; then
         OUT="$_o"; break
     fi
     _i=$((_i + 1))
     sleep 2
 done
+printf '%s\n' "$OUT" >"$CLI_OUT" 2>/dev/null || true
 printf '%s\n' "$OUT" | sed 's/^/    /' | head -30
-printf '%s\n' "$OUT" | grep -q "gateway online" || fail "冒烟断言失败: gateway 非 online"
+printf '%s\n' "$OUT" | grep -q "gateway online" || smoke_fail "冒烟断言失败: gateway 非 online"
 if printf '%s\n' "$OUT" | grep -q " offline"; then
-    fail "冒烟断言失败: 存在 offline daemon"
+    smoke_fail "冒烟断言失败: 存在 offline daemon"
 fi
 SUMMARY="$(printf '%s\n' "$OUT" | grep -E '^online [0-9]+/[0-9]+$' | tail -1)"
-[ -n "$SUMMARY" ] || fail "冒烟断言失败: 缺汇总行 online N/M"
+[ -n "$SUMMARY" ] || smoke_fail "冒烟断言失败: 缺汇总行 online N/M"
 N="${SUMMARY#online }"; N="${N%%/*}"
 M="${SUMMARY#*/}"
 if [ "$N" != "$M" ] || [ "$M" -le 0 ]; then
-    fail "冒烟断言失败: 汇总 $SUMMARY（要求 N==M 且 M>0）"
+    smoke_fail "冒烟断言失败: 汇总 $SUMMARY（要求 N==M 且 M>0）"
 fi
 info "CLI 冒烟通过: $SUMMARY"
 
