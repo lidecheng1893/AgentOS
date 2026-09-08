@@ -5,7 +5,9 @@
 # agentrt 现为 workflow 宿主仓（发布平面）。本脚本取代原伞仓同名脚本：
 # 同步对象从伞仓（agent-workload/tools/docs/...）收窄为 agentrt + 其
 # 7 个叶子子模块（atoms/commons/cupolas/daemons/gateway/heapstore/
-# protocols）。伞仓 airymaxhub 恢复纯容器，不再承载任何流水线。
+# protocols）+ 发布链消费的 sibling 数据仓（tools/sdk/ecosystem，
+# 0.1.13 收口项：rc2 实证镜像落后阻塞 e2e，纳入自动通道）。伞仓
+# airymaxhub 恢复纯容器，不再承载任何流水线。
 #
 # 根因修复（旧版三大缺陷，沿用）：
 #   1. 循环依赖死锁：旧 workflow 用 checkout submodules:true，需要从
@@ -293,6 +295,13 @@ gm="$WORK/root.gitmodules"
 git -C "$GITHUB_WORKSPACE" show HEAD:.gitmodules > "$gm" 2>/dev/null || : > "$gm"
 enqueue "$gm"
 rm -f "$gm"
+
+# 1b) sibling 发布数据仓（tools/sdk/ecosystem）：release 链从 GitHub 镜像
+# 克隆这三仓取发布脚本 / TUI 源 / Python 运行时。rc2 实证：tools 镜像落后
+# 5 提交、缺 e2e-clean-room.sh → e2e exit 127。0.1.13 收口项：纳入自动
+# 镜像通道，消除人工快进依赖。sdk 的嵌套子模块（tui/sdk-python，相对 URL
+# ../tui.git）由 sync_repo 的 HEAD:.gitmodules BFS 自动入队，无需列名。
+QUEUE+=(tools sdk ecosystem)
 
 # 2) BFS 全子模块树（agentrt 叶子 → 若有嵌套则继续，深度 ≤3）
 while [ "${#QUEUE[@]}" -gt 0 ]; do
