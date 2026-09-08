@@ -65,9 +65,6 @@ jobs:
 
       - name: Run G4b clean-host verify
         run: |
-          echo "::error::G4BDBG PWD=$PWD"
-          echo "::error::G4BDBG top-level: $(ls -1 | tr '\n' ' ')"
-          echo "::error::G4BDBG scripts-dir: $(ls -1 scripts 2>&1 | tr '\n' ' ')"
           bash .github/scripts/verify-macos-clean-host.sh \
             "$PWD/scripts/install.sh" \
             "$PWD/agentrt-${VERSION}-${SUFFIX}.tar.gz" \
@@ -94,7 +91,11 @@ jobs:
           ls -la agentrt-*
 
       - name: Run G4b clean-host verify
-        run: bash .github/scripts/verify-macos-clean-host.sh \
+        # 必须用 block scalar（|）：plain scalar 多行折叠会把行尾 \ 与折叠
+        # 空格合并成转义空格，参数获得前导空格 → [ -f ] false
+        # （G4b rc4-2 x86 腿失败根因，2026-09-08 实证）。
+        run: |
+          bash .github/scripts/verify-macos-clean-host.sh \
             "$PWD/scripts/install.sh" \
             "$PWD/agentrt-${VERSION}-${SUFFIX}.tar.gz" \
             "$PWD/latest/airymaxrt"

@@ -82,7 +82,10 @@ rm -f "$CTRL"; mkfifo "$CTRL" 2>/dev/null || true
 exec 9<>"$CTRL"
 LOGF="$AH/logs/g4b-clean-host.out"
 mkdir -p "$AH/logs" 2>/dev/null || true
-bash "$AH/bin/airymaxrt-full" <"$CTRL" >"$LOGF" 2>&1 &
+# AIRYRT_TERM_LOG=verbose：launcher 文档化排障开关（默认 quiet 时 INFO 只写
+# airymaxrt.log 不进 stderr）。核验场景要求启动时序全量可见——stdout+stderr
+# 合流 LOGF 后，死点（set -e 静默退出等）可精确到条目级。
+AIRYRT_TERM_LOG=verbose bash "$AH/bin/airymaxrt-full" <"$CTRL" >"$LOGF" 2>&1 &
 L_PID=$!
 # 关闭子进程读端之外的引用；写端 fd9 保持打开
 sleep 2
@@ -107,12 +110,24 @@ if [ "$_GW_OK" != "1" ]; then
     # 日志/状态转 annotation（GitHub job 日志需 admin，annotation 匿名 API
     # 可读，是 CI 台账的证据通道）。逐行 ::error 保证多行都可见。
     echo "::error::gateway TCP 不可达: 127.0.0.1:${GWP}"
-    echo "::error::-- launcher 日志尾部 --"
-    tail -n 60 "$LOGF" 2>/dev/null | sed 's/^/::error::/; s/%/%25/g; s/\r//g' | head -60 || true
+    echo "::error::-- launcher 进程状态 --"
+    if kill -0 "$L_PID" 2>/dev/null; then
+        echo "::error::launcher 仍存活（PID $L_PID）——非 set -e 退出"
+    else
+        echo "::error::launcher 已退出（PID $L_PID）——疑似 set -e 静默终止"
+    fi
+    echo "::error::-- launcher 日志尾部（verbose，stdout+stderr 合流）--"
+    tail -n 80 "$LOGF" 2>/dev/null | sed 's/^/::error::/; s/%/%25/g; s/\r//g' | head -80 || true
+    echo "::error::-- airymaxrt.log 尾部（boot 进度真身，含 debug）--"
+    tail -n 120 "$AH/logs/airymaxrt.log" 2>/dev/null | sed 's/^/::error::/; s/%/%25/g; s/\r//g' | head -120 || true
+    echo "::error::-- logs/ 目录 --"
+    ls -1 "$AH/logs" 2>/dev/null | sed 's/^/::error::/' | head -30 || true
     echo "::error::-- run/ 目录 --"
     ls -1 "$AH/run" 2>/dev/null | sed 's/^/::error::/' | head -20 || true
     echo "::error::-- gateway_d.out --"
     tail -n 20 "$AH/logs/gateway_d.out" 2>/dev/null | sed 's/^/::error::/; s/%/%25/g; s/\r//g' | head -20 || true
+    echo "::error::-- 进程表（daemon 群/launcher 残留）--"
+    ps aux 2>/dev/null | grep -E '[_]d( |$)|airymax|airy' | head -20 | sed 's/^/::error::/; s/%/%25/g; s/\r//g' || true
     exit 1
 fi
 info "gateway online（127.0.0.1:$GWP）"
