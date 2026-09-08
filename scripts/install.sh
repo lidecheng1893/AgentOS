@@ -769,15 +769,24 @@ install_binary() {
         log_err "release 包缺失 daemon 二进制（bin/*_d 为空，制品不完整）"
         return 2
     fi
-    # lib/（.so 自包含）部署 + 校验：0.1.5a 旧包曾缺 libcjson.so.1 导致
-    # daemon/airy_cli 启动即失败（社区反馈）。包内 lib/ 含 .so 时必须
+    # lib/（.so/.dylib 自包含）部署 + 校验：0.1.5a 旧包曾缺 libcjson.so.1 导致
+    # daemon/airy_cli 启动即失败（社区反馈）。包内 lib/ 含库文件时必须
     # 确认部署成功，缺失即 fail-closed（不再静默吞错）。
-    if [ -d "${extracted}/lib" ] && ls "${extracted}"/lib/*.so* >/dev/null 2>&1; then
+    # macOS 教训（0.1.13 G4b rc4-7）：bundle-macos-dylibs.sh 将引用重写为
+    # @executable_path/../lib/*.dylib，而本块条件曾只匹配 .so* —— darwin 上
+    # 整块跳过，~/.airymaxrt/lib/ 为空，dyld 报 libsqlite3/libssl.3/
+    # libmicrohttpd.12 "no such file"，daemon 群 14/15 全崩。库面 glob 必须
+    # 同时覆盖 .so* 与 .dylib*。
+    lib_has() {
+        # lib_has <dir> —— 目录内含 .so/.dylib 自包含库（任一形态）即为真
+        ls "$1"/*.so* >/dev/null 2>&1 || ls "$1"/*.dylib* >/dev/null 2>&1
+    }
+    if [ -d "${extracted}/lib" ] && lib_has "${extracted}/lib"; then
         mkdir -p "${AIRY_HOME}/lib"
         rm -rf "${AIRY_HOME}"/lib/* 2>/dev/null || true
         cp -rf "${extracted}"/lib/* "${AIRY_HOME}/lib/" 2>/dev/null
-        if ! ls "${AIRY_HOME}"/lib/*.so* >/dev/null 2>&1; then
-            log_err "lib/ 部署失败（.so 未就位），二进制将无法启动"
+        if ! lib_has "${AIRY_HOME}/lib"; then
+            log_err "lib/ 部署失败（.so/.dylib 未就位），二进制将无法启动"
             return 2
         fi
     fi
