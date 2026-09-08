@@ -136,7 +136,7 @@ publish 被正确阻塞但失败归因一度被误导为容器内阶段失败。
 
 **维护要求**：tools / sdk / ecosystem / agent-workload / docs-closed 等顶层仓在
 atomgit 提交后，若其内容被 GitHub 侧 CI 消费（release 打包脚本、bootstrap、
-e2e 脚本、TUI/Python 运行时），须手动把 `main` 快进同步到 GitHub：
+e2e 脚本、TUI/Python 运行时），须手动把 `main` 快进同步到三端（GitHub + Gitee）：
 
 ```bash
 git -C <repo> push git@github.com:openairymax/<repo>.git main:main
@@ -144,7 +144,28 @@ git -C <repo> push git@github.com:openairymax/<repo>.git main:main
 
 无分叉时快进即可（镜像终态与 SSoT 一致）；分叉时须先对齐 SSoT 再推。
 0.1.13 收口项：为这些仓补一条自动镜像通道（或在 release 链改用 atomgit 拉取），
-避免依赖人工记忆。
+避免依赖人工记忆（登记于 0.2.x 规划）。
+
+### 三端终验（2026-09-08，0.1.13 mirror-close）
+
+全量 11 仓（agentrt + 7 叶子 + tools/sdk 类 sibling）main HEAD 三端比对
+**11/11 SAME**，取证通道：
+
+| 端 | 通道 | 备注 |
+|----|------|------|
+| atomgit | `git ls-remote`（SSH remote） | SSoT，本机有 key |
+| GitHub | `api.github.com`（REST，PAT） | 网络封锁下 `github.com:443` git 直连超时、API 通 |
+| Gitee | MCP `compare_branches_tags`（base=head=main 取 `base_commit.sha`） | 私有仓 HTTPS ls-remote 会卡交互式凭据，弃用 |
+
+**atoms 定性**：三端 `private: true` 一致（gitee MCP / GitHub API / atomgit），
+属**私有源码区**而非镜像缺位；HEAD 三端同为 `69b8577e958a`。
+
+**叶子自动通道实证**：commons 提交 `1aefe86` 仅推 github + atomgit，gitee 侧
+`pushed_at = 2026-09-08T15:43:54+08` 与推送同刻——`Mirror Sync`（`push main`
+触发）自动补齐 gitee，叶子仓无需手动配 gitee remote。
+
+**网络纪律**：私有仓探测一律 `GIT_SSH_COMMAND="ssh -o BatchMode=yes"` 与
+`GIT_TERMINAL_PROMPT=0`，杜绝凭据提示挂死终端。
 
 ### 发布 tag 与重复 Release run（H3/P19 SOP，2026-09-06 更正根因）
 
